@@ -17,7 +17,7 @@
       </div>
 
       <p class="hint">
-        开启后，需要快速连按两次 Alt+X 才会触发截图，防止游戏中误触。
+        开启后，需要快速连按两次 F1 才会触发截图，防止游戏中误触。
       </p>
 
       <button class="capture-btn" @click="triggerCapture">立即截图</button>

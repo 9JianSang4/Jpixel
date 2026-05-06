@@ -95,15 +95,19 @@ fn create_pin_window(app: AppHandle, image_path: String) {
 }
 
 #[tauri::command]
-fn capture_screen_region(x: i32, y: i32, width: u32, height: u32) -> Result<String, String> {
+fn capture_screen_region(app: AppHandle, x: i32, y: i32, width: u32, height: u32) -> Result<String, String> {
     use screenshots::Screen;
+    use arboard::Clipboard;
 
     let screen = Screen::from_point(x, y).map_err(|e| e.to_string())?;
     let image = screen
         .capture_area(x, y, width, height)
         .map_err(|e| e.to_string())?;
 
-    let temp_dir = std::env::temp_dir();
+    let picture_dir = app.path().picture_dir().map_err(|e| e.to_string())?;
+    let save_dir = picture_dir.join("Jpixel");
+    std::fs::create_dir_all(&save_dir).map_err(|e| e.to_string())?;
+
     let filename = format!(
         "jpixel-{}.png",
         std::time::SystemTime::now()
@@ -111,8 +115,16 @@ fn capture_screen_region(x: i32, y: i32, width: u32, height: u32) -> Result<Stri
             .unwrap()
             .as_millis()
     );
-    let path = temp_dir.join(filename);
+    let path = save_dir.join(&filename);
     image.save(&path).map_err(|e| e.to_string())?;
+
+    let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
+    let img_data = arboard::ImageData {
+        width: image.width() as usize,
+        height: image.height() as usize,
+        bytes: std::borrow::Cow::Borrowed(image.as_raw()),
+    };
+    clipboard.set_image(img_data).map_err(|e| e.to_string())?;
 
     Ok(path.to_string_lossy().to_string())
 }
@@ -185,10 +197,9 @@ pub fn run() {
             let app_handle = app.handle();
 
             // System tray
-            let capture_item = MenuItem::with_id(app, "capture", "截图", true, None::<&str>)?;
             let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&capture_item, &settings_item, &quit_item])?;
+            let menu = Menu::with_items(app, &[&settings_item, &quit_item])?;
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -197,10 +208,6 @@ pub fn run() {
                 .on_menu_event({
                     let _app_handle = app_handle.clone();
                     move |app: &AppHandle, event| match event.id.as_ref() {
-                        "capture" => {
-                            let _ = app.emit("trigger-capture", ());
-                            create_capture_window(app.app_handle().clone());
-                        }
                         "settings" => {
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.show();
@@ -214,9 +221,11 @@ pub fn run() {
                     }
                 })
                 .on_tray_icon_event(|_tray: &tauri::tray::TrayIcon, event| {
-                    if let TrayIconEvent::Click { .. } = event {
-                        let _ = _tray.app_handle().emit("trigger-capture", ());
-                        create_capture_window(_tray.app_handle().clone());
+                    if let TrayIconEvent::Click { button, .. } = event {
+                        if button == tauri::tray::MouseButton::Left {
+                            let _ = _tray.app_handle().emit("trigger-capture", ());
+                            create_capture_window(_tray.app_handle().clone());
+                        }
                     }
                 })
                 .build(app)?;

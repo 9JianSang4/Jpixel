@@ -22,7 +22,7 @@
     </div>
 
     <!-- Floating toolbar -->
-    <div v-if="hasSelection" class="toolbar" :style="toolbarStyle">
+    <div v-if="hasSelection" class="toolbar" :style="toolbarStyle" @mousedown.stop @mouseup.stop>
       <button class="tool-btn" @click.stop="onConfirm" title="确认 (Enter/双击)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
       </button>
@@ -48,6 +48,9 @@ const endX = ref(0);
 const endY = ref(0);
 const isDragging = ref(false);
 const hasSelection = ref(false);
+const dragMode = ref<'create' | 'move'>('create');
+const moveOffsetX = ref(0);
+const moveOffsetY = ref(0);
 
 const selLeft = computed(() => Math.min(startX.value, endX.value));
 const selTop = computed(() => Math.min(startY.value, endY.value));
@@ -74,6 +77,23 @@ const toolbarStyle = computed(() => {
 
 function onMouseDown(e: MouseEvent) {
   if (e.button !== 0) return;
+
+  if (hasSelection.value) {
+    const inSelection =
+      e.clientX >= selLeft.value &&
+      e.clientX <= selRight.value &&
+      e.clientY >= selTop.value &&
+      e.clientY <= selBottom.value;
+    if (inSelection) {
+      dragMode.value = 'move';
+      moveOffsetX.value = e.clientX - selLeft.value;
+      moveOffsetY.value = e.clientY - selTop.value;
+      isDragging.value = true;
+      return;
+    }
+  }
+
+  dragMode.value = 'create';
   isDragging.value = true;
   hasSelection.value = true;
   startX.value = e.clientX;
@@ -85,7 +105,18 @@ function onMouseDown(e: MouseEvent) {
 function onMouseMove(e: MouseEvent) {
   cursorX.value = e.clientX;
   cursorY.value = e.clientY;
-  if (isDragging.value) {
+  if (!isDragging.value) return;
+
+  if (dragMode.value === 'move') {
+    const newLeft = e.clientX - moveOffsetX.value;
+    const newTop = e.clientY - moveOffsetY.value;
+    const w = selWidth.value;
+    const h = selHeight.value;
+    startX.value = newLeft;
+    startY.value = newTop;
+    endX.value = newLeft + w;
+    endY.value = newTop + h;
+  } else {
     endX.value = e.clientX;
     endY.value = e.clientY;
   }
