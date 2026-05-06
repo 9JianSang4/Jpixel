@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo --version)",
+      "Bash(rustc --version)",
+      "Bash(npm --version)",
+      "Bash(mv /d/myfile/jpixel/.claude /d/myfile/.claude-temp-jpixel)",
+      "Read(//d/myfile/**)",
+      "Bash(npx create-tauri-app@latest jpixel --template vue-ts --manager npm --yes)",
+      "Bash(npm install *)",
+      "Bash(cargo check *)",
+      "Bash(npm run *)",
+      "Bash(tasklist)",
+      "Bash(taskkill /F /IM jpixel.exe)",
+      "Bash(taskkill /F /IM node.exe)",
+      "Bash(git init *)",
+      "Bash(git config *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
