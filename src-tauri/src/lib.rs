@@ -232,6 +232,8 @@ fn create_capture_window(app: AppHandle) {
             .transparent(true)
             .always_on_top(true)
             .skip_taskbar(true)
+            .resizable(false)
+            .shadow(false)
             .position(pos.x as f64, pos.y as f64)
             .inner_size(size.width as f64, size.height as f64)
             .focused(true)

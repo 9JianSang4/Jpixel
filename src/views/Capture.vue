@@ -1,5 +1,5 @@
 <template>
-  <div class="capture-layer" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @dblclick="onConfirm" @keydown.esc="onCancel" tabindex="0" ref="layerRef">
+  <div class="capture-layer" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @dblclick="onConfirm" tabindex="0" ref="layerRef">
     <!-- Crosshair cursor lines -->
     <div v-if="!isDragging && !hasSelection" class="crosshair-h" :style="{ top: cursorY + 'px' }" />
     <div v-if="!isDragging && !hasSelection" class="crosshair-v" :style="{ left: cursorX + 'px' }" />
@@ -151,8 +151,14 @@ function onCancel() {
 }
 
 function onKeyDown(e: KeyboardEvent) {
-  if (e.key === "Enter") onConfirm();
-  if (e.key === "Escape") onCancel();
+  if (e.key === "Enter") {
+    e.preventDefault();
+    onConfirm();
+  }
+  if (e.key === "Escape") {
+    e.preventDefault();
+    onCancel();
+  }
 }
 
 onMounted(() => {
