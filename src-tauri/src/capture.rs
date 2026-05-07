@@ -9,6 +9,9 @@ pub async fn save_region_dialog(
     width: u32,
     height: u32,
 ) -> Result<(), String> {
+    // Close capture overlay before showing the dialog so it isn't blocked by always-on-top windows
+    crate::window::close_capture_windows(app.clone());
+
     use screenshots::Screen;
     use tauri_plugin_dialog::DialogExt;
 

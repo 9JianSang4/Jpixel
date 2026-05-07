@@ -310,8 +310,8 @@ async function onConfirm() {
       width: selWidth.value,
       height: selHeight.value,
     });
-    await invoke("close_capture_windows");
     await invoke("create_editor_window", { imagePath: path });
+    setTimeout(() => invoke("close_capture_windows"), 100);
   } catch (e) {
     console.error("Capture failed:", e);
     onCancel();
@@ -359,14 +359,12 @@ async function onCopyRegion() {
 async function onSaveRegion() {
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
   try {
-    const region = {
+    await invoke("save_region_dialog", {
       x: selLeft.value,
       y: selTop.value,
       width: selWidth.value,
       height: selHeight.value,
-    };
-    await invoke("close_capture_windows");
-    await invoke("save_region_dialog", region);
+    });
   } catch (e) {
     console.error("Save failed:", e);
   }
@@ -381,8 +379,8 @@ async function onPinRegion() {
       width: selWidth.value,
       height: selHeight.value,
     });
-    await invoke("close_capture_windows");
     await invoke("create_pin_window", { imagePath: path });
+    setTimeout(() => invoke("close_capture_windows"), 100);
   } catch (e) {
     console.error("Pin failed:", e);
   }
