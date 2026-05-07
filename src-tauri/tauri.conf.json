@@ -20,6 +20,7 @@
         "decorations": true,
         "fullscreen": false,
         "maximized": false,
+        "maximizable": false,
         "center": true
       }
     ],
