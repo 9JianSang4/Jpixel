@@ -55,52 +55,69 @@ pub fn close_capture_windows(app: AppHandle) {
 
 #[tauri::command]
 pub fn create_editor_window(app: AppHandle, image_path: String) {
-    let label = format!(
-        "editor-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
-    let encoded = urlencoding::encode(&image_path);
-    let url = format!("/#/editor?path={}", encoded);
-    if let Err(e) = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(false)
-        .title("Jpixel Editor")
-        .inner_size(900.0, 700.0)
-        .center()
-        .visible(true)
-        .build()
-    {
-        log::error!("Failed to create editor window: {}", e);
-    }
+    // Spawn window creation off the IPC thread to avoid WebView2 deadlock on Windows
+    std::thread::spawn(move || {
+        // Give the IPC call time to return before we touch the window system
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let label = format!(
+            "editor-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+        let encoded = urlencoding::encode(&image_path);
+        let url = format!("/#/editor?path={}", encoded);
+        if let Err(e) = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(false)
+            .title("Jpixel Editor")
+            .inner_size(900.0, 700.0)
+            .center()
+            .visible(true)
+            .build()
+        {
+            log::error!("Failed to create editor window: {}", e);
+        }
+
+        close_capture_windows(app);
+    });
 }
 
 #[tauri::command]
 pub fn create_pin_window(app: AppHandle, image_path: String) {
-    let label = format!(
-        "pin-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
-    let encoded = urlencoding::encode(&image_path);
-    let url = format!("/#/pin?path={}", encoded);
-    if let Err(e) = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .inner_size(400.0, 300.0)
-        .visible(true)
-        .build()
-    {
-        log::error!("Failed to create pin window: {}", e);
-    }
+    // Spawn window creation off the IPC thread to avoid WebView2 deadlock on Windows
+    std::thread::spawn(move || {
+        // Give the IPC call time to return before we touch the window system
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let label = format!(
+            "pin-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+        let encoded = urlencoding::encode(&image_path);
+        let url = format!("/#/pin?path={}", encoded);
+        if let Err(e) = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .inner_size(400.0, 300.0)
+            .visible(true)
+            .build()
+        {
+            log::error!("Failed to create pin window: {}", e);
+        }
+
+        close_capture_windows(app);
+    });
 }
 
 #[tauri::command]

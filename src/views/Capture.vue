@@ -311,7 +311,6 @@ async function onConfirm() {
       height: selHeight.value,
     });
     await invoke("create_editor_window", { imagePath: path });
-    setTimeout(() => invoke("close_capture_windows"), 100);
   } catch (e) {
     console.error("Capture failed:", e);
     onCancel();
@@ -380,7 +379,6 @@ async function onPinRegion() {
       height: selHeight.value,
     });
     await invoke("create_pin_window", { imagePath: path });
-    setTimeout(() => invoke("close_capture_windows"), 100);
   } catch (e) {
     console.error("Pin failed:", e);
   }
