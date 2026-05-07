@@ -24,7 +24,6 @@
 import { ref, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { invoke } from "@tauri-apps/api/core";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 
@@ -40,12 +39,18 @@ const SCALE_STEP = 0.1;
 
 const route = useRoute();
 
-onMounted(() => {
+onMounted(async () => {
   containerRef.value?.focus();
   const path = route.query.path as string | undefined;
   console.log("[Pin] path from route:", path);
   if (path) {
-    imageSrc.value = convertFileSrc(path);
+    try {
+      const base64: string = await invoke("read_image_base64", { path });
+      imageSrc.value = base64;
+    } catch (e) {
+      loadError.value = true;
+      console.error("[Pin] Failed to load image:", e);
+    }
   }
 });
 

@@ -1,8 +1,16 @@
 <template>
-  <div class="capture-layer" :style="{ cursor: cursorStyle }" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @dblclick="onConfirm" tabindex="0" ref="layerRef">
-    <!-- Crosshair cursor lines -->
-    <div v-if="!isDragging && !hasSelection" class="crosshair-h" :style="{ top: cursorY + 'px' }" />
-    <div v-if="!isDragging && !hasSelection" class="crosshair-v" :style="{ left: cursorX + 'px' }" />
+  <div class="capture-layer" :style="{ cursor: cursorStyle }" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @dblclick="onConfirm" @contextmenu.prevent tabindex="0" ref="layerRef">
+    <!-- Crosshair cursor lines (segmented to skip 120x120 area around cursor) -->
+    <template v-if="!isDragging && !hasSelection">
+      <!-- Horizontal left segment -->
+      <div class="crosshair-h" :style="{ transform: `translateY(${cursorY}px)`, width: `${Math.max(0, cursorX - 60)}px` }" />
+      <!-- Horizontal right segment -->
+      <div class="crosshair-h" :style="{ transform: `translateY(${cursorY}px)`, left: `${cursorX + 60}px`, width: `calc(100vw - ${cursorX + 60}px)` }" />
+      <!-- Vertical top segment -->
+      <div class="crosshair-v" :style="{ transform: `translateX(${cursorX}px)`, height: `${Math.max(0, cursorY - 60)}px` }" />
+      <!-- Vertical bottom segment -->
+      <div class="crosshair-v" :style="{ transform: `translateX(${cursorX}px)`, top: `${cursorY + 60}px`, height: `calc(100vh - ${cursorY + 60}px)` }" />
+    </template>
 
     <!-- Dark overlay with hole -->
     <template v-if="hasSelection">
@@ -68,10 +76,16 @@ const pixelColor = ref({ r: 0, g: 0, b: 0 });
 const magnifierSrc = ref("");
 const showMagnifier = ref(true);
 
+const copyHotkey = ref("Ctrl+C");
+const saveHotkey = ref("Ctrl+S");
+const pinHotkey = ref("Ctrl+T");
+
 const HANDLE = 8;
 const THROTTLE = 50;
+const MIN_SELECTION_SIZE = 2;
 
 let pendingTimeout: number | null = null;
+let isUnmounted = false;
 
 const selLeft = computed(() => Math.min(startX.value, endX.value));
 const selTop = computed(() => Math.min(startY.value, endY.value));
@@ -176,13 +190,17 @@ function zoneToCursor(zone: Zone): string {
 async function updateMagnifierAndColor(x: number, y: number) {
   try {
     const color: string = await invoke("get_pixel_color", { x, y });
+    if (isUnmounted) return;
     const [r, g, b] = color.split(",").map(Number);
     pixelColor.value = { r, g, b };
 
     const src: string = await invoke("get_magnifier_area", { x, y, size: 15 });
+    if (isUnmounted) return;
     magnifierSrc.value = src;
   } catch (e) {
-    console.error("Magnifier error:", e);
+    if (!isUnmounted) {
+      console.error("Magnifier error:", e);
+    }
   }
 }
 
@@ -226,24 +244,26 @@ function onMouseMove(e: MouseEvent) {
     }
   }
 
-  if (dragMode.value === 'move') {
-    const newLeft = e.clientX - moveOffsetX.value;
-    const newTop = e.clientY - moveOffsetY.value;
-    const w = selWidth.value;
-    const h = selHeight.value;
-    startX.value = newLeft;
-    startY.value = newTop;
-    endX.value = newLeft + w;
-    endY.value = newTop + h;
-  } else if (dragMode.value.startsWith('resize-')) {
-    const zone = dragMode.value.replace('resize-', '');
-    if (zone.includes('n')) startY.value = e.clientY;
-    if (zone.includes('s')) endY.value = e.clientY;
-    if (zone.includes('w')) startX.value = e.clientX;
-    if (zone.includes('e')) endX.value = e.clientX;
-  } else {
-    endX.value = e.clientX;
-    endY.value = e.clientY;
+  if (isDragging.value) {
+    if (dragMode.value === 'move') {
+      const newLeft = e.clientX - moveOffsetX.value;
+      const newTop = e.clientY - moveOffsetY.value;
+      const w = selWidth.value;
+      const h = selHeight.value;
+      startX.value = newLeft;
+      startY.value = newTop;
+      endX.value = newLeft + w;
+      endY.value = newTop + h;
+    } else if (dragMode.value.startsWith('resize-')) {
+      const zone = dragMode.value.replace('resize-', '');
+      if (zone.includes('n')) startY.value = e.clientY;
+      if (zone.includes('s')) endY.value = e.clientY;
+      if (zone.includes('w')) startX.value = e.clientX;
+      if (zone.includes('e')) endX.value = e.clientX;
+    } else {
+      endX.value = e.clientX;
+      endY.value = e.clientY;
+    }
   }
 
   // Throttle magnifier updates
@@ -255,8 +275,27 @@ function onMouseMove(e: MouseEvent) {
   }
 }
 
+function clampSelection() {
+  const min = MIN_SELECTION_SIZE;
+  if (selWidth.value < min) {
+    if (startX.value <= endX.value) {
+      endX.value = startX.value + min;
+    } else {
+      startX.value = endX.value + min;
+    }
+  }
+  if (selHeight.value < min) {
+    if (startY.value <= endY.value) {
+      endY.value = startY.value + min;
+    } else {
+      startY.value = endY.value + min;
+    }
+  }
+}
+
 function onMouseUp() {
   isDragging.value = false;
+  clampSelection();
 }
 
 async function onConfirm() {
@@ -283,31 +322,124 @@ function onCancel() {
   invoke("close_capture_windows");
 }
 
+function matchHotkey(e: KeyboardEvent, hotkey: string): boolean {
+  const parts = hotkey.split("+").map((p) => p.trim());
+  let ctrl = false, shift = false, alt = false;
+  let key = "";
+  for (const part of parts) {
+    if (part === "Ctrl") ctrl = true;
+    else if (part === "Shift") shift = true;
+    else if (part === "Alt") alt = true;
+    else key = part;
+  }
+  if (key.length === 1) key = key.toUpperCase();
+  return (
+    e.ctrlKey === ctrl &&
+    e.shiftKey === shift &&
+    e.altKey === alt &&
+    e.key.toUpperCase() === key.toUpperCase()
+  );
+}
+
+async function onCopyRegion() {
+  if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
+  try {
+    await invoke("copy_region_to_clipboard", {
+      x: selLeft.value,
+      y: selTop.value,
+      width: selWidth.value,
+      height: selHeight.value,
+    });
+    invoke("close_capture_windows");
+  } catch (e) {
+    console.error("Copy failed:", e);
+  }
+}
+
+async function onSaveRegion() {
+  if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
+  try {
+    const region = {
+      x: selLeft.value,
+      y: selTop.value,
+      width: selWidth.value,
+      height: selHeight.value,
+    };
+    await invoke("close_capture_windows");
+    await invoke("save_region_dialog", region);
+  } catch (e) {
+    console.error("Save failed:", e);
+  }
+}
+
+async function onPinRegion() {
+  if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
+  try {
+    const path: string = await invoke("create_pin_from_region", {
+      x: selLeft.value,
+      y: selTop.value,
+      width: selWidth.value,
+      height: selHeight.value,
+    });
+    await invoke("close_capture_windows");
+    await invoke("create_pin_window", { imagePath: path });
+  } catch (e) {
+    console.error("Pin failed:", e);
+  }
+}
+
 function onKeyDown(e: KeyboardEvent) {
   if (e.key === "Enter") {
     e.preventDefault();
     onConfirm();
+    return;
   }
   if (e.key === "Escape") {
     e.preventDefault();
     onCancel();
+    return;
   }
-  if (e.key === "c" || e.key === "C") {
+  if ((e.key === "c" || e.key === "C") && !e.ctrlKey && !e.altKey && !e.metaKey) {
     e.preventDefault();
     invoke("copy_text_to_clipboard", { text: hexColor.value });
+    return;
+  }
+  if (matchHotkey(e, copyHotkey.value)) {
+    e.preventDefault();
+    onCopyRegion();
+    return;
+  }
+  if (matchHotkey(e, saveHotkey.value)) {
+    e.preventDefault();
+    onSaveRegion();
+    return;
+  }
+  if (matchHotkey(e, pinHotkey.value)) {
+    e.preventDefault();
+    onPinRegion();
+    return;
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   layerRef.value?.focus();
   window.addEventListener("keydown", onKeyDown);
+  try {
+    copyHotkey.value = await invoke("get_copy_hotkey");
+    saveHotkey.value = await invoke("get_save_hotkey");
+    pinHotkey.value = await invoke("get_pin_hotkey");
+  } catch (e) {
+    console.error("Failed to load hotkeys:", e);
+  }
   updateMagnifierAndColor(cursorX.value, cursorY.value);
 });
 
 onUnmounted(() => {
+  isUnmounted = true;
   window.removeEventListener("keydown", onKeyDown);
   if (pendingTimeout !== null) {
     clearTimeout(pendingTimeout);
+    pendingTimeout = null;
   }
 });
 </script>
@@ -331,6 +463,7 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.4);
   pointer-events: none;
   z-index: 10;
+  will-change: transform;
 }
 
 .crosshair-v {
@@ -341,6 +474,7 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.4);
   pointer-events: none;
   z-index: 10;
+  will-change: transform;
 }
 
 .overlay {

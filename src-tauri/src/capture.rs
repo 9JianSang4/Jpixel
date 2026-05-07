@@ -154,6 +154,15 @@ pub fn create_pin_from_region(
 }
 
 #[tauri::command]
+pub fn read_image_base64(path: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("Failed to read image file '{}': {}", path, e))?;
+    let base64_str = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:image/png;base64,{}", base64_str))
+}
+
+#[tauri::command]
 pub fn get_pixel_color(x: i32, y: i32) -> Result<String, String> {
     use screenshots::Screen;
 
