@@ -88,7 +88,7 @@ pub fn create_editor_window(app: AppHandle, image_path: String) {
 }
 
 #[tauri::command]
-pub fn create_pin_window(app: AppHandle, image_path: String) {
+pub fn create_pin_window(app: AppHandle, image_path: String, x: i32, y: i32) {
     // Spawn window creation off the IPC thread to avoid WebView2 deadlock on Windows
     std::thread::spawn(move || {
         // Give the IPC call time to return before we touch the window system
@@ -109,6 +109,7 @@ pub fn create_pin_window(app: AppHandle, image_path: String) {
             .shadow(false)
             .always_on_top(true)
             .skip_taskbar(true)
+            .position(x as f64, y as f64)
             .inner_size(400.0, 300.0)
             .visible(true)
             .build()

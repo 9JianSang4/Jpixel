@@ -378,7 +378,11 @@ async function onPinRegion() {
       width: selWidth.value,
       height: selHeight.value,
     });
-    await invoke("create_pin_window", { imagePath: path });
+    await invoke("create_pin_window", {
+      imagePath: path,
+      x: selLeft.value,
+      y: selTop.value,
+    });
   } catch (e) {
     console.error("Pin failed:", e);
   }

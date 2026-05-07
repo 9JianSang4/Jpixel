@@ -1,18 +1,14 @@
 <template>
   <div
     class="pin-container"
+    data-tauri-drag-region
     @wheel="onWheel"
     @contextmenu.prevent="onClose"
     @keydown="onKeyDown"
     tabindex="0"
     ref="containerRef"
   >
-    <div
-      class="img-wrapper"
-      :style="{ transform: `scale(${scale})` }"
-      v-if="imageSrc && !loadError"
-      data-tauri-drag-region
-    >
+    <div class="img-wrapper" v-if="imageSrc && !loadError">
       <img :src="imageSrc" draggable="false" @load="onImageLoad" @error="onImageError" ref="imgRef" />
     </div>
     <div v-else-if="loadError" class="placeholder error">图片加载失败，右键关闭</div>
@@ -30,11 +26,13 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 const containerRef = ref<HTMLDivElement | null>(null);
 const imgRef = ref<HTMLImageElement | null>(null);
 const imageSrc = ref("");
-const scale = ref(1.0);
 const loadError = ref(false);
+const baseWidth = ref(0);
+const baseHeight = ref(0);
+const scale = ref(1.0);
 
-const SCALE_MIN = 0.2;
-const SCALE_MAX = 5.0;
+const SCALE_MIN = 0.5;
+const SCALE_MAX = 3.0;
 const SCALE_STEP = 0.1;
 
 const route = useRoute();
@@ -42,7 +40,6 @@ const route = useRoute();
 onMounted(async () => {
   containerRef.value?.focus();
   const path = route.query.path as string | undefined;
-  console.log("[Pin] path from route:", path);
   if (path) {
     try {
       const base64: string = await invoke("read_image_base64", { path });
@@ -59,7 +56,6 @@ function onImageLoad() {
   if (!img) return;
 
   // screenshots crate captures physical pixels; convert to logical size
-  // so the pin window matches the user's selection dimensions
   const dpr = window.devicePixelRatio || 1;
   let w = img.naturalWidth / dpr;
   let h = img.naturalHeight / dpr;
@@ -78,6 +74,10 @@ function onImageLoad() {
     w = w * ratio;
   }
 
+  baseWidth.value = w;
+  baseHeight.value = h;
+  scale.value = 1.0;
+
   const win = getCurrentWebviewWindow();
   win.setSize(new LogicalSize(w, h)).catch(console.error);
 }
@@ -93,6 +93,11 @@ function onWheel(e: WheelEvent) {
   let newScale = scale.value + delta;
   newScale = Math.max(SCALE_MIN, Math.min(SCALE_MAX, newScale));
   scale.value = parseFloat(newScale.toFixed(2));
+
+  const win = getCurrentWebviewWindow();
+  const newW = baseWidth.value * newScale;
+  const newH = baseHeight.value * newScale;
+  win.setSize(new LogicalSize(newW, newH)).catch(console.error);
 }
 
 function onClose() {
@@ -131,16 +136,18 @@ function onKeyDown(e: KeyboardEvent) {
 }
 
 .img-wrapper {
-  transform-origin: center center;
-  transition: transform 0.05s linear;
-  will-change: transform;
-  pointer-events: none;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .img-wrapper img {
   display: block;
-  max-width: none;
-  max-height: none;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
 }
