@@ -1,5 +1,5 @@
 <template>
-  <div class="capture-layer" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @dblclick="onConfirm" tabindex="0" ref="layerRef">
+  <div class="capture-layer" :style="{ cursor: cursorStyle }" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @dblclick="onConfirm" tabindex="0" ref="layerRef">
     <!-- Crosshair cursor lines -->
     <div v-if="!isDragging && !hasSelection" class="crosshair-h" :style="{ top: cursorY + 'px' }" />
     <div v-if="!isDragging && !hasSelection" class="crosshair-v" :style="{ left: cursorX + 'px' }" />
@@ -48,9 +48,12 @@ const endX = ref(0);
 const endY = ref(0);
 const isDragging = ref(false);
 const hasSelection = ref(false);
-const dragMode = ref<'create' | 'move'>('create');
+const dragMode = ref<'create' | 'move' | string>('create');
 const moveOffsetX = ref(0);
 const moveOffsetY = ref(0);
+const cursorStyle = ref('crosshair');
+
+const HANDLE = 8;
 
 const selLeft = computed(() => Math.min(startX.value, endX.value));
 const selTop = computed(() => Math.min(startY.value, endY.value));
@@ -75,19 +78,64 @@ const toolbarStyle = computed(() => {
   };
 });
 
+type Zone = 'nw' | 'n' | 'ne' | 'w' | 'move' | 'e' | 'sw' | 's' | 'se' | 'outside';
+
+function getCursorZone(x: number, y: number): Zone {
+  if (!hasSelection.value) return 'outside';
+  const left = selLeft.value;
+  const top = selTop.value;
+  const right = selRight.value;
+  const bottom = selBottom.value;
+
+  if (x < left - HANDLE || x > right + HANDLE || y < top - HANDLE || y > bottom + HANDLE) {
+    return 'outside';
+  }
+
+  const onLeft = Math.abs(x - left) <= HANDLE;
+  const onRight = Math.abs(x - right) <= HANDLE;
+  const onTop = Math.abs(y - top) <= HANDLE;
+  const onBottom = Math.abs(y - bottom) <= HANDLE;
+
+  if (onTop && onLeft) return 'nw';
+  if (onTop && onRight) return 'ne';
+  if (onBottom && onLeft) return 'sw';
+  if (onBottom && onRight) return 'se';
+  if (onTop) return 'n';
+  if (onBottom) return 's';
+  if (onLeft) return 'w';
+  if (onRight) return 'e';
+
+  return 'move';
+}
+
+function zoneToCursor(zone: Zone): string {
+  switch (zone) {
+    case 'nw':
+    case 'se': return 'nwse-resize';
+    case 'ne':
+    case 'sw': return 'nesw-resize';
+    case 'n':
+    case 's': return 'ns-resize';
+    case 'w':
+    case 'e': return 'ew-resize';
+    case 'move': return 'move';
+    default: return 'crosshair';
+  }
+}
+
 function onMouseDown(e: MouseEvent) {
   if (e.button !== 0) return;
 
   if (hasSelection.value) {
-    const inSelection =
-      e.clientX >= selLeft.value &&
-      e.clientX <= selRight.value &&
-      e.clientY >= selTop.value &&
-      e.clientY <= selBottom.value;
-    if (inSelection) {
-      dragMode.value = 'move';
-      moveOffsetX.value = e.clientX - selLeft.value;
-      moveOffsetY.value = e.clientY - selTop.value;
+    const zone = getCursorZone(e.clientX, e.clientY);
+    if (zone !== 'outside') {
+      if (zone === 'move') {
+        dragMode.value = 'move';
+        moveOffsetX.value = e.clientX - selLeft.value;
+        moveOffsetY.value = e.clientY - selTop.value;
+      } else {
+        dragMode.value = `resize-${zone}`;
+      }
       isDragging.value = true;
       return;
     }
@@ -105,7 +153,16 @@ function onMouseDown(e: MouseEvent) {
 function onMouseMove(e: MouseEvent) {
   cursorX.value = e.clientX;
   cursorY.value = e.clientY;
-  if (!isDragging.value) return;
+
+  if (!isDragging.value) {
+    if (hasSelection.value) {
+      const zone = getCursorZone(e.clientX, e.clientY);
+      cursorStyle.value = zoneToCursor(zone);
+    } else {
+      cursorStyle.value = 'crosshair';
+    }
+    return;
+  }
 
   if (dragMode.value === 'move') {
     const newLeft = e.clientX - moveOffsetX.value;
@@ -116,6 +173,12 @@ function onMouseMove(e: MouseEvent) {
     startY.value = newTop;
     endX.value = newLeft + w;
     endY.value = newTop + h;
+  } else if (dragMode.value.startsWith('resize-')) {
+    const zone = dragMode.value.replace('resize-', '');
+    if (zone.includes('n')) startY.value = e.clientY;
+    if (zone.includes('s')) endY.value = e.clientY;
+    if (zone.includes('w')) startX.value = e.clientX;
+    if (zone.includes('e')) endX.value = e.clientX;
   } else {
     endX.value = e.clientX;
     endY.value = e.clientY;
@@ -178,7 +241,6 @@ onUnmounted(() => {
   left: 0;
   width: 100vw;
   height: 100vh;
-  cursor: crosshair;
   outline: none;
   overflow: hidden;
 }
