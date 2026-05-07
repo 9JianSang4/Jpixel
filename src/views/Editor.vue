@@ -7,15 +7,21 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { useRoute } from "vue-router";
+import { invoke } from "@tauri-apps/api/core";
 
 const imageSrc = ref("");
+const route = useRoute();
 
-onMounted(() => {
-  const params = new URLSearchParams(window.location.search);
-  const path = params.get("path");
+onMounted(async () => {
+  const path = route.query.path as string | undefined;
   if (path) {
-    imageSrc.value = convertFileSrc(path);
+    try {
+      const base64: string = await invoke("read_image_base64", { path });
+      imageSrc.value = base64;
+    } catch (e) {
+      console.error("Failed to load image:", e);
+    }
   }
 });
 </script>

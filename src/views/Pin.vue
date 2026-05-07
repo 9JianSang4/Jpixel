@@ -58,14 +58,14 @@ function onImageLoad() {
   const img = imgRef.value;
   if (!img) return;
 
-  const naturalW = img.naturalWidth;
-  const naturalH = img.naturalHeight;
+  // screenshots crate captures physical pixels; convert to logical size
+  // so the pin window matches the user's selection dimensions
+  const dpr = window.devicePixelRatio || 1;
+  let w = img.naturalWidth / dpr;
+  let h = img.naturalHeight / dpr;
 
   const maxW = window.screen.width * 0.8;
   const maxH = window.screen.height * 0.8;
-
-  let w = naturalW;
-  let h = naturalH;
 
   if (w > maxW) {
     const ratio = maxW / w;
