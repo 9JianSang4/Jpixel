@@ -324,6 +324,53 @@ fn capture_screen_region(
     Ok(path.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+fn get_pixel_color(x: i32, y: i32) -> Result<String, String> {
+    use screenshots::Screen;
+
+    let screen = Screen::from_point(x, y).map_err(|e| e.to_string())?;
+    let image = screen
+        .capture_area(x, y, 1, 1)
+        .map_err(|e| e.to_string())?;
+
+    let pixel = image.get_pixel(0, 0);
+    Ok(format!("{},{},{}", pixel[0], pixel[1], pixel[2]))
+}
+
+#[tauri::command]
+fn get_magnifier_area(x: i32, y: i32, size: u32) -> Result<String, String> {
+    use base64::Engine;
+    use image::{DynamicImage, ImageOutputFormat};
+    use screenshots::Screen;
+    use std::io::Cursor;
+
+    let half = (size / 2) as i32;
+    let capture_x = (x - half).max(0);
+    let capture_y = (y - half).max(0);
+
+    let screen = Screen::from_point(x, y).map_err(|e| e.to_string())?;
+    let image = screen
+        .capture_area(capture_x, capture_y, size, size)
+        .map_err(|e| e.to_string())?;
+
+    let dynamic = DynamicImage::ImageRgba8(image);
+    let mut cursor = Cursor::new(Vec::new());
+    dynamic
+        .write_to(&mut cursor, ImageOutputFormat::Png)
+        .map_err(|e| e.to_string())?;
+
+    let base64_str = base64::engine::general_purpose::STANDARD.encode(cursor.into_inner());
+    Ok(format!("data:image/png;base64,{}", base64_str))
+}
+
+#[tauri::command]
+fn copy_text_to_clipboard(text: String) -> Result<(), String> {
+    use arboard::Clipboard;
+    let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(text).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn handle_capture_hotkey(app: &AppHandle, config: &ConfigArc) {
     let mut cfg = config.lock().unwrap();
 
@@ -388,7 +435,10 @@ pub fn run() {
             get_double_press_enabled,
             set_double_press_enabled,
             get_screenshot_hotkey,
-            set_screenshot_hotkey
+            set_screenshot_hotkey,
+            get_pixel_color,
+            get_magnifier_area,
+            copy_text_to_clipboard
         ])
         .setup(move |app| {
             let app_handle = app.handle();
