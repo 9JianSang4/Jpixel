@@ -366,6 +366,7 @@ async function onConfirm() {
       Math.round(selHeight.value * dpr.value)
     );
     await createEditorWindow(path);
+    closeCaptureWindows();
   } catch (e) {
     console.error("Capture failed:", e);
     onCancel();

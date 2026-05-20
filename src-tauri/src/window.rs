@@ -1,18 +1,69 @@
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
+/// Serialise concurrent capture-window operations across IPC threads.
+///
+/// On Windows, WebView2 window close / create must be marshalled onto the
+/// main-thread COM apartment.  Calling `window.close()` from multiple
+/// threads concurrently does not deadlock by itself, but it can cause window
+/// operations to accumulate faster than the event loop drains them, leading
+/// to progressive lag and eventual process hang.  This mutex ensures only
+/// one thread at a time performs capture-window operations.
+fn capture_op_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Hide all `capture-*` windows and wait for the compositor to finish a frame
+/// without them, so that subsequent screen capture does not include the overlay
+/// UI (magnifier, toolbar, crosshair, selection box, …) in the image.
+pub fn hide_capture_windows(app: &AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if label.starts_with("capture-") {
+            let _ = window.hide();
+        }
+    }
+    // Allow the compositor to finish a frame without the overlay.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+}
+
+/// Iterate all `capture-*` windows and call `.close()` on each.
+///
+/// Does **not** acquire [`capture_op_lock`] — callers are responsible for
+/// holding it when needed.
+fn close_capture_windows_inner(app: &AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if label.starts_with("capture-") {
+            if let Err(e) = window.close() {
+                log::warn!("Failed to close capture window {}: {}", label, e);
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub fn create_capture_window(app: AppHandle) {
-    // Close all old capture windows and wait for them to finish tearing down.
-    // On Windows, WebView2 window destruction is async via COM — there is no
-    // synchronous API to wait for it, so we poll with a timeout.
-    close_capture_windows(app.clone());
-    for _ in 0..40 {
+    // Phase 1 — close old capture windows, then release the lock so that
+    // other threads (e.g. frontend IPC) can still close windows
+    {
+        let _lock = capture_op_lock().lock().unwrap();
+        close_capture_windows_inner(&app);
+    }
+
+    // Phase 2 — poll briefly for the async COM close to finish.
+    // We do NOT hold the mutex here so the main thread event loop can
+    // process the close events.  If it times out we create new windows
+    // regardless; unique timestamp labels prevent label collisions.
+    for _ in 0..10 {
         if !app.webview_windows().keys().any(|k| k.starts_with("capture-")) {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+
+    // Phase 3 — create new capture windows under the lock
+    let _lock = capture_op_lock().lock().unwrap();
 
     let monitors = match app.available_monitors() {
         Ok(m) => m,
@@ -74,13 +125,10 @@ pub fn create_capture_window(app: AppHandle) {
 
 #[tauri::command]
 pub fn close_capture_windows(app: AppHandle) {
-    for (label, window) in app.webview_windows() {
-        if label.starts_with("capture-") {
-            if let Err(e) = window.close() {
-                log::warn!("Failed to close capture window {}: {}", label, e);
-            }
-        }
-    }
+    // Acquire the op-lock so we never race with create_capture_window or
+    // other concurrent close_capture_windows calls.
+    let _lock = capture_op_lock().lock().unwrap();
+    close_capture_windows_inner(&app);
 }
 
 #[tauri::command]
@@ -114,8 +162,6 @@ pub fn create_editor_window(app: AppHandle, image_path: String) {
         {
             log::error!("Failed to create editor window: {}", e);
         }
-
-        close_capture_windows(app);
     });
 }
 

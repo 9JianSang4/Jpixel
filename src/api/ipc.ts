@@ -11,6 +11,12 @@ import { invoke } from "@tauri-apps/api/core";
 // Capture
 // ─────────────────────────────────────────────────────────────
 
+export interface RgbColor {
+  r: number;
+  g: number;
+  b: number;
+}
+
 export async function captureScreenRegion(
   x: number,
   y: number,
@@ -51,7 +57,7 @@ export async function readImageBase64(path: string): Promise<string> {
   return invoke("read_image_base64", { path });
 }
 
-export async function getPixelColor(x: number, y: number): Promise<string> {
+export async function getPixelColor(x: number, y: number): Promise<RgbColor> {
   return invoke("get_pixel_color", { x, y });
 }
 

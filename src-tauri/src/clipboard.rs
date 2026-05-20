@@ -1,15 +1,19 @@
 use crate::capture::screen::{default_capture, Rect, ScreenCapture};
 use crate::error::JpixelError;
 use arboard::Clipboard;
+use tauri::AppHandle;
 
 /// Copy a screen region to the clipboard as an image.
 #[tauri::command]
 pub fn copy_region_to_clipboard(
+    app: AppHandle,
     x: i32,
     y: i32,
     width: u32,
     height: u32,
 ) -> Result<(), JpixelError> {
+    crate::window::hide_capture_windows(&app);
+
     let image = default_capture()
         .capture_region(Rect { x, y, width, height })
         .map_err(JpixelError::Capture)?;

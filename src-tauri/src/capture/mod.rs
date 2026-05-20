@@ -63,11 +63,14 @@ pub async fn save_region_dialog(
     width: u32,
     height: u32,
 ) -> Result<(), JpixelError> {
-    crate::window::close_capture_windows(app.clone());
+    crate::window::hide_capture_windows(&app);
 
     let image = default_capture()
         .capture_region(Rect { x, y, width, height })
         .map_err(JpixelError::Capture)?;
+
+    // Close the hidden windows so the file dialog shows the desktop behind it.
+    crate::window::close_capture_windows(app.clone());
 
     let app_clone = app.clone();
     let file_path: Option<tauri_plugin_dialog::FilePath> =
@@ -104,6 +107,10 @@ pub fn capture_screen_region(
     width: u32,
     height: u32,
 ) -> Result<String, JpixelError> {
+    // Hide the overlay before capturing so the magnifier / toolbar are not
+    // included in the screenshot image.
+    crate::window::hide_capture_windows(&app);
+
     let image = default_capture()
         .capture_region(Rect { x, y, width, height })
         .map_err(JpixelError::Capture)?;
@@ -128,15 +135,7 @@ pub fn create_pin_from_region(
     width: u32,
     height: u32,
 ) -> Result<String, JpixelError> {
-    // Hide capture overlays synchronously so they disappear from the compositor.
-    for (label, window) in app.webview_windows() {
-        if label.starts_with("capture-") {
-            let _ = window.hide();
-        }
-    }
-
-    // Allow the compositor to finish a frame without the overlay.
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    crate::window::hide_capture_windows(&app);
 
     let image = default_capture()
         .capture_region(Rect { x, y, width, height })
@@ -292,11 +291,14 @@ pub fn cleanup_temp_pins(temp_dir: &PathBuf) {
 
 #[tauri::command]
 pub fn ocr_region(
+    app: AppHandle,
     x: i32,
     y: i32,
     width: u32,
     height: u32,
 ) -> Result<String, JpixelError> {
+    crate::window::hide_capture_windows(&app);
+
     let image = default_capture()
         .capture_region(Rect { x, y, width, height })
         .map_err(JpixelError::Capture)?;
