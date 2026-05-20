@@ -15,13 +15,81 @@
           </div>
           <div
             class="hotkey-input"
-            :class="{ recording: isRecording }"
+            :class="{ recording: recordingMode === 'screenshot' }"
             tabindex="0"
-            @click="startRecording"
-            @keydown="onKeyDown"
+            @click="startRecording('screenshot')"
+            @keydown="(e) => onKeyDown(e, 'screenshot')"
             @blur="stopRecording"
           >
-            {{ isRecording ? "按下快捷键..." : screenshotHotkey }}
+            {{ recordingMode === 'screenshot' ? '按下快捷键...' : screenshotHotkey }}
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">复制</div>
+            <div class="setting-desc">框选后按下快捷键直接复制到剪贴板</div>
+          </div>
+          <div
+            class="hotkey-input"
+            :class="{ recording: recordingMode === 'copy' }"
+            tabindex="0"
+            @click="startRecording('copy')"
+            @keydown="(e) => onKeyDown(e, 'copy')"
+            @blur="stopRecording"
+          >
+            {{ recordingMode === 'copy' ? '按下快捷键...' : copyHotkey }}
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">保存</div>
+            <div class="setting-desc">框选后按下快捷键弹出保存对话框</div>
+          </div>
+          <div
+            class="hotkey-input"
+            :class="{ recording: recordingMode === 'save' }"
+            tabindex="0"
+            @click="startRecording('save')"
+            @keydown="(e) => onKeyDown(e, 'save')"
+            @blur="stopRecording"
+          >
+            {{ recordingMode === 'save' ? '按下快捷键...' : saveHotkey }}
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">贴图</div>
+            <div class="setting-desc">框选后按下快捷键直接贴图</div>
+          </div>
+          <div
+            class="hotkey-input"
+            :class="{ recording: recordingMode === 'pin' }"
+            tabindex="0"
+            @click="startRecording('pin')"
+            @keydown="(e) => onKeyDown(e, 'pin')"
+            @blur="stopRecording"
+          >
+            {{ recordingMode === 'pin' ? '按下快捷键...' : pinHotkey }}
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">OCR 文字识别</div>
+            <div class="setting-desc">框选后按下快捷键识别文字</div>
+          </div>
+          <div
+            class="hotkey-input"
+            :class="{ recording: recordingMode === 'ocr' }"
+            tabindex="0"
+            @click="startRecording('ocr')"
+            @keydown="(e) => onKeyDown(e, 'ocr')"
+            @blur="stopRecording"
+          >
+            {{ recordingMode === 'ocr' ? '按下快捷键...' : ocrHotkey }}
           </div>
         </div>
 
@@ -36,70 +104,139 @@
           </label>
         </div>
       </div>
+
+      <h2 style="margin-top: 32px;">GIF 录制</h2>
+      <div class="setting-group">
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">默认帧率</div>
+            <div class="setting-desc">GIF 录制每秒捕获帧数</div>
+          </div>
+          <select v-model.number="gifFps" @change="onGifFpsChange" class="select-input">
+            <option :value="5">5 fps</option>
+            <option :value="10">10 fps</option>
+            <option :value="15">15 fps</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">输出质量</div>
+            <div class="setting-desc">GIF 颜色数量（越少文件越小）</div>
+          </div>
+          <select v-model.number="gifQuality" @change="onGifQualityChange" class="select-input">
+            <option :value="64">低 (64色)</option>
+            <option :value="128">中 (128色)</option>
+            <option :value="256">高 (256色)</option>
+          </select>
+        </div>
+      </div>
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import {
+  getDoublePressEnabled,
+  setDoublePressEnabled,
+  getScreenshotHotkey,
+  setScreenshotHotkey,
+  getCopyHotkey,
+  setCopyHotkey,
+  getSaveHotkey,
+  setSaveHotkey,
+  getPinHotkey,
+  setPinHotkey,
+  getOcrHotkey,
+  setOcrHotkey,
+  getGifFps,
+  setGifFps,
+  getGifQuality,
+  setGifQuality,
+} from "../api/ipc";
+import { formatHotkey } from "../utils/hotkey";
 
 const doublePress = ref(false);
 const screenshotHotkey = ref("F1");
-const isRecording = ref(false);
+const copyHotkey = ref("Ctrl+C");
+const saveHotkey = ref("Ctrl+S");
+const pinHotkey = ref("Ctrl+T");
+const ocrHotkey = ref("Ctrl+R");
+const gifFps = ref(10);
+const gifQuality = ref(128);
+const recordingMode = ref<string | null>(null);
 
 onMounted(async () => {
-  doublePress.value = await invoke("get_double_press_enabled");
-  screenshotHotkey.value = await invoke("get_screenshot_hotkey");
+  try {
+    doublePress.value = await getDoublePressEnabled();
+    screenshotHotkey.value = await getScreenshotHotkey();
+    copyHotkey.value = await getCopyHotkey();
+    saveHotkey.value = await getSaveHotkey();
+    pinHotkey.value = await getPinHotkey();
+    ocrHotkey.value = await getOcrHotkey();
+    gifFps.value = await getGifFps();
+    gifQuality.value = await getGifQuality();
+  } catch (e) {
+    console.error("Failed to load settings:", e);
+  }
 });
 
 function onToggle() {
-  invoke("set_double_press_enabled", { enabled: doublePress.value });
+  setDoublePressEnabled(doublePress.value).catch((err: unknown) => {
+    console.error("Failed to set double press:", err);
+  });
 }
 
-function startRecording() {
-  isRecording.value = true;
+function onGifFpsChange() {
+  setGifFps(gifFps.value).catch((err: unknown) => {
+    console.error("Failed to set GIF fps:", err);
+  });
+}
+
+function onGifQualityChange() {
+  setGifQuality(gifQuality.value).catch((err: unknown) => {
+    console.error("Failed to set GIF quality:", err);
+  });
+}
+
+function startRecording(mode: string) {
+  recordingMode.value = mode;
 }
 
 function stopRecording() {
-  isRecording.value = false;
+  recordingMode.value = null;
 }
 
-function onKeyDown(e: KeyboardEvent) {
-  if (!isRecording.value) return;
+interface SetterEntry {
+  ref: typeof screenshotHotkey;
+  setter: (hotkey: string) => Promise<void>;
+}
+
+const setters: Record<string, SetterEntry> = {
+  screenshot: { ref: screenshotHotkey, setter: setScreenshotHotkey },
+  copy: { ref: copyHotkey, setter: setCopyHotkey },
+  save: { ref: saveHotkey, setter: setSaveHotkey },
+  pin: { ref: pinHotkey, setter: setPinHotkey },
+  ocr: { ref: ocrHotkey, setter: setOcrHotkey },
+};
+
+function onKeyDown(e: KeyboardEvent, mode: string) {
+  if (recordingMode.value !== mode) return;
   e.preventDefault();
   e.stopPropagation();
 
-  const modifiers: string[] = [];
-  if (e.ctrlKey) modifiers.push("Ctrl");
-  if (e.altKey) modifiers.push("Alt");
-  if (e.shiftKey) modifiers.push("Shift");
-  if (e.metaKey) modifiers.push("Super");
+  const hotkeyStr = formatHotkey(e);
+  if (!hotkeyStr) return;
 
-  let key = e.key;
-  if (
-    key === "Control" ||
-    key === "Alt" ||
-    key === "Shift" ||
-    key === "Meta"
-  ) {
-    return;
-  }
+  recordingMode.value = null;
 
-  if (key === " ") key = "Space";
-  if (key.length === 1) key = key.toUpperCase();
+  const entry = setters[mode];
+  if (!entry) return;
 
-  const parts = [...modifiers, key];
-  const hotkeyStr = parts.join("+");
-
-  screenshotHotkey.value = hotkeyStr;
-  isRecording.value = false;
-
-  invoke("set_screenshot_hotkey", { hotkey: hotkeyStr }).catch((err) => {
-    console.error("Failed to set hotkey:", err);
-    invoke("get_screenshot_hotkey").then((v) => {
-      screenshotHotkey.value = v as string;
-    });
+  entry.ref.value = hotkeyStr;
+  entry.setter(hotkeyStr).catch((err: unknown) => {
+    console.error(`Failed to set ${mode} hotkey:`, err);
   });
 }
 </script>
@@ -211,6 +348,18 @@ h2 {
   background: rgba(0, 122, 255, 0.05);
   color: #007aff;
   animation: pulse 1.5s infinite;
+}
+
+.select-input {
+  min-width: 120px;
+  padding: 8px 14px;
+  border: 1px solid #d1d1d6;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #1d1d1f;
+  background: #fafafa;
+  cursor: pointer;
+  outline: none;
 }
 
 @keyframes pulse {

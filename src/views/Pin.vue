@@ -2,14 +2,21 @@
   <div
     class="pin-container"
     data-tauri-drag-region
-    @wheel="onWheel"
     @contextmenu.prevent="onClose"
     @keydown="onKeyDown"
+    @wheel.prevent="onWindowWheel"
+    @mousedown.left="onMouseDown"
     tabindex="0"
     ref="containerRef"
   >
     <div class="img-wrapper" v-if="imageSrc && !loadError">
-      <img :src="imageSrc" draggable="false" @load="onImageLoad" @error="onImageError" ref="imgRef" />
+      <img
+        :src="imageSrc"
+        draggable="false"
+        @load="onImageLoad"
+        @error="onImageError"
+        ref="imgRef"
+      />
     </div>
     <div v-else-if="loadError" class="placeholder error">图片加载失败，右键关闭</div>
     <div v-else class="placeholder">贴图窗口</div>
@@ -24,7 +31,6 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 
 const containerRef = ref<HTMLDivElement | null>(null);
-const imgRef = ref<HTMLImageElement | null>(null);
 const imageSrc = ref("");
 const loadError = ref(false);
 const baseWidth = ref(0);
@@ -39,6 +45,14 @@ const route = useRoute();
 
 onMounted(async () => {
   containerRef.value?.focus();
+
+  let w = parseInt(route.query.width as string) || 400;
+  let h = parseInt(route.query.height as string) || 300;
+  w = Math.max(10, Math.min(8000, w));
+  h = Math.max(10, Math.min(8000, h));
+  baseWidth.value = w;
+  baseHeight.value = h;
+
   const path = route.query.path as string | undefined;
   if (path) {
     try {
@@ -52,34 +66,7 @@ onMounted(async () => {
 });
 
 function onImageLoad() {
-  const img = imgRef.value;
-  if (!img) return;
-
-  // screenshots crate captures physical pixels; convert to logical size
-  const dpr = window.devicePixelRatio || 1;
-  let w = img.naturalWidth / dpr;
-  let h = img.naturalHeight / dpr;
-
-  const maxW = window.screen.width * 0.8;
-  const maxH = window.screen.height * 0.8;
-
-  if (w > maxW) {
-    const ratio = maxW / w;
-    w = maxW;
-    h = h * ratio;
-  }
-  if (h > maxH) {
-    const ratio = maxH / h;
-    h = maxH;
-    w = w * ratio;
-  }
-
-  baseWidth.value = w;
-  baseHeight.value = h;
-  scale.value = 1.0;
-
-  const win = getCurrentWebviewWindow();
-  win.setSize(new LogicalSize(w, h)).catch(console.error);
+  // Window size is already set by Rust using the selection dimensions.
 }
 
 function onImageError() {
@@ -87,17 +74,26 @@ function onImageError() {
   console.error("[Pin] Failed to load image:", imageSrc.value);
 }
 
-function onWheel(e: WheelEvent) {
-  e.preventDefault();
+function onWindowWheel(e: WheelEvent) {
   const delta = e.deltaY > 0 ? -SCALE_STEP : SCALE_STEP;
   let newScale = scale.value + delta;
   newScale = Math.max(SCALE_MIN, Math.min(SCALE_MAX, newScale));
-  scale.value = parseFloat(newScale.toFixed(2));
+  scale.value = Math.round(newScale * 100) / 100;
 
   const win = getCurrentWebviewWindow();
-  const newW = baseWidth.value * newScale;
-  const newH = baseHeight.value * newScale;
-  win.setSize(new LogicalSize(newW, newH)).catch(console.error);
+  const newW = Math.round(baseWidth.value * newScale);
+  const newH = Math.round(baseHeight.value * newScale);
+  win.setSize(new LogicalSize(newW, newH)).catch((err: unknown) => {
+    console.error("[Pin] setSize failed:", err);
+  });
+}
+
+function onMouseDown(e: MouseEvent) {
+  // data-tauri-drag-region handles most cases; this is a fallback.
+  e.preventDefault();
+  getCurrentWebviewWindow().startDragging().catch((err: unknown) => {
+    console.error("[Pin] startDragging failed:", err);
+  });
 }
 
 function onClose() {
@@ -123,7 +119,7 @@ function onKeyDown(e: KeyboardEvent) {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  background: transparent;
+  background: #000;
   outline: none;
   display: flex;
   align-items: center;
@@ -145,11 +141,13 @@ function onKeyDown(e: KeyboardEvent) {
 
 .img-wrapper img {
   display: block;
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
   user-select: none;
   -webkit-user-drag: none;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  box-sizing: border-box;
 }
 
 .placeholder {

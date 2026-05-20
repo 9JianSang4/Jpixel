@@ -35,6 +35,21 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
       </button>
       <div class="divider" />
+      <button class="tool-btn" @click.stop="onOcr" title="文字识别 (Ctrl+R)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
+      </button>
+      <button
+        class="tool-btn"
+        :class="{ recording: isRecordingGif }"
+        @click.stop="onGifRecord"
+        :title="isRecordingGif ? '停止录制' : 'GIF 录制'"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle v-if="!isRecordingGif" cx="12" cy="12" r="10"/><circle v-else cx="12" cy="12" r="4" fill="currentColor"/>
+          <path v-if="!isRecordingGif" d="M12 6v6l4 2"/>
+        </svg>
+      </button>
+      <div class="divider" />
       <button class="tool-btn" @click.stop="onCancel" title="取消 (Esc)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
@@ -55,7 +70,27 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { useRoute } from "vue-router";
+import {
+  captureScreenRegion,
+  copyRegionToClipboard,
+  saveRegionDialog,
+  createPinFromRegion,
+  createEditorWindow,
+  closeCaptureWindows,
+  copyTextToClipboard,
+  getPixelColor,
+  getMagnifierArea,
+  ocrRegion,
+  startGifRecord,
+  stopGifRecord,
+  getCopyHotkey,
+  getSaveHotkey,
+  getPinHotkey,
+  getOcrHotkey,
+  getGifFps,
+  getGifQuality,
+} from "../api/ipc";
 
 const layerRef = ref<HTMLDivElement | null>(null);
 const cursorX = ref(0);
@@ -67,7 +102,8 @@ const endX = ref(0);
 const endY = ref(0);
 const isDragging = ref(false);
 const hasSelection = ref(false);
-const dragMode = ref<'create' | 'move' | string>('create');
+type DragMode = 'create' | 'move' | 'resize-nw' | 'resize-n' | 'resize-ne' | 'resize-w' | 'resize-e' | 'resize-sw' | 'resize-s' | 'resize-se';
+const dragMode = ref<DragMode>('create');
 const moveOffsetX = ref(0);
 const moveOffsetY = ref(0);
 const cursorStyle = ref('crosshair');
@@ -75,10 +111,27 @@ const cursorStyle = ref('crosshair');
 const pixelColor = ref({ r: 0, g: 0, b: 0 });
 const magnifierSrc = ref("");
 const showMagnifier = ref(true);
+const isRecordingGif = ref(false);
 
 const copyHotkey = ref("Ctrl+C");
 const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
+const ocrHotkey = ref("Ctrl+R");
+const gifFps = ref(10);
+const gifQuality = ref(128);
+const route = useRoute();
+const winOffset = ref({
+  x: parseInt((route.query.ox as string) || "0"),
+  y: parseInt((route.query.oy as string) || "0"),
+});
+const dpr = ref(parseFloat((route.query.scale as string) || "1"));
+
+// Convert CSS-pixel coordinate + physical origin to absolute physical pixels.
+// The screenshot backend uses physical pixel coordinates, but mouse events
+// in the WebView report CSS pixels (== logical pixels).
+function toPhysical(cssCoord: number, physicalOrigin: number): number {
+  return physicalOrigin + Math.round(cssCoord * dpr.value);
+}
 
 const HANDLE = 8;
 const THROTTLE = 50;
@@ -189,12 +242,11 @@ function zoneToCursor(zone: Zone): string {
 
 async function updateMagnifierAndColor(x: number, y: number) {
   try {
-    const color: string = await invoke("get_pixel_color", { x, y });
+    const color = await getPixelColor(x, y);
     if (isUnmounted) return;
-    const [r, g, b] = color.split(",").map(Number);
-    pixelColor.value = { r, g, b };
+    pixelColor.value = { r: color.r, g: color.g, b: color.b };
 
-    const src: string = await invoke("get_magnifier_area", { x, y, size: 15 });
+    const src = await getMagnifierArea(x, y, 15);
     if (isUnmounted) return;
     magnifierSrc.value = src;
   } catch (e) {
@@ -270,7 +322,10 @@ function onMouseMove(e: MouseEvent) {
   if (pendingTimeout === null) {
     pendingTimeout = window.setTimeout(() => {
       pendingTimeout = null;
-      updateMagnifierAndColor(cursorX.value, cursorY.value);
+      updateMagnifierAndColor(
+        toPhysical(cursorX.value, winOffset.value.x),
+        toPhysical(cursorY.value, winOffset.value.y)
+      );
     }, THROTTLE);
   }
 }
@@ -304,13 +359,13 @@ async function onConfirm() {
     return;
   }
   try {
-    const path: string = await invoke("capture_screen_region", {
-      x: selLeft.value,
-      y: selTop.value,
-      width: selWidth.value,
-      height: selHeight.value,
-    });
-    await invoke("create_editor_window", { imagePath: path });
+    const path = await captureScreenRegion(
+      toPhysical(selLeft.value, winOffset.value.x),
+      toPhysical(selTop.value, winOffset.value.y),
+      Math.round(selWidth.value * dpr.value),
+      Math.round(selHeight.value * dpr.value)
+    );
+    await createEditorWindow(path);
   } catch (e) {
     console.error("Capture failed:", e);
     onCancel();
@@ -318,24 +373,27 @@ async function onConfirm() {
 }
 
 function onCancel() {
-  invoke("close_capture_windows");
+  closeCaptureWindows();
 }
 
 function matchHotkey(e: KeyboardEvent, hotkey: string): boolean {
   const parts = hotkey.split("+").map((p) => p.trim());
-  let ctrl = false, shift = false, alt = false;
+  let ctrl = false, shift = false, alt = false, meta = false;
   let key = "";
   for (const part of parts) {
     if (part === "Ctrl") ctrl = true;
     else if (part === "Shift") shift = true;
     else if (part === "Alt") alt = true;
+    else if (part === "Super" || part === "Cmd" || part === "Meta" || part === "Win") meta = true;
     else key = part;
   }
+  if (key === " ") key = "Space";
   if (key.length === 1) key = key.toUpperCase();
   return (
     e.ctrlKey === ctrl &&
     e.shiftKey === shift &&
     e.altKey === alt &&
+    e.metaKey === meta &&
     e.key.toUpperCase() === key.toUpperCase()
   );
 }
@@ -343,13 +401,13 @@ function matchHotkey(e: KeyboardEvent, hotkey: string): boolean {
 async function onCopyRegion() {
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
   try {
-    await invoke("copy_region_to_clipboard", {
-      x: selLeft.value,
-      y: selTop.value,
-      width: selWidth.value,
-      height: selHeight.value,
-    });
-    invoke("close_capture_windows");
+    await copyRegionToClipboard(
+      toPhysical(selLeft.value, winOffset.value.x),
+      toPhysical(selTop.value, winOffset.value.y),
+      Math.round(selWidth.value * dpr.value),
+      Math.round(selHeight.value * dpr.value)
+    );
+    closeCaptureWindows();
   } catch (e) {
     console.error("Copy failed:", e);
   }
@@ -358,12 +416,12 @@ async function onCopyRegion() {
 async function onSaveRegion() {
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
   try {
-    await invoke("save_region_dialog", {
-      x: selLeft.value,
-      y: selTop.value,
-      width: selWidth.value,
-      height: selHeight.value,
-    });
+    await saveRegionDialog(
+      toPhysical(selLeft.value, winOffset.value.x),
+      toPhysical(selTop.value, winOffset.value.y),
+      Math.round(selWidth.value * dpr.value),
+      Math.round(selHeight.value * dpr.value)
+    );
   } catch (e) {
     console.error("Save failed:", e);
   }
@@ -372,19 +430,67 @@ async function onSaveRegion() {
 async function onPinRegion() {
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
   try {
-    const path: string = await invoke("create_pin_from_region", {
-      x: selLeft.value,
-      y: selTop.value,
-      width: selWidth.value,
-      height: selHeight.value,
-    });
-    await invoke("create_pin_window", {
-      imagePath: path,
-      x: selLeft.value,
-      y: selTop.value,
-    });
+    await createPinFromRegion(
+      toPhysical(selLeft.value, winOffset.value.x),
+      toPhysical(selTop.value, winOffset.value.y),
+      Math.round(selWidth.value * dpr.value),
+      Math.round(selHeight.value * dpr.value)
+    );
   } catch (e) {
     console.error("Pin failed:", e);
+  }
+}
+
+async function onOcr() {
+  if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
+  try {
+    const text = await ocrRegion(
+      toPhysical(selLeft.value, winOffset.value.x),
+      toPhysical(selTop.value, winOffset.value.y),
+      Math.round(selWidth.value * dpr.value),
+      Math.round(selHeight.value * dpr.value)
+    );
+    await copyTextToClipboard(text);
+    alert(`OCR 结果已复制到剪贴板:\n${text}`);
+    closeCaptureWindows();
+  } catch (e) {
+    console.error("OCR failed:", e);
+    alert("OCR 识别失败，请检查 Tesseract 是否已安装并加入 PATH。");
+  }
+}
+
+async function onGifRecord() {
+  if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
+
+  if (isRecordingGif.value) {
+    // Stop recording
+    try {
+      const path = await stopGifRecord();
+      alert(`GIF 已保存:\n${path}`);
+      isRecordingGif.value = false;
+      closeCaptureWindows();
+    } catch (e) {
+      console.error("GIF stop failed:", e);
+      alert("GIF 保存失败。");
+      isRecordingGif.value = false;
+    }
+  } else {
+    // Start recording
+    try {
+      await startGifRecord(
+        toPhysical(selLeft.value, winOffset.value.x),
+        toPhysical(selTop.value, winOffset.value.y),
+        Math.round(selWidth.value * dpr.value),
+        Math.round(selHeight.value * dpr.value),
+        gifFps.value,
+        0.5,
+        gifQuality.value
+      );
+      isRecordingGif.value = true;
+    } catch (e) {
+      console.error("GIF start failed:", e);
+      alert("GIF 录制启动失败。");
+    }
   }
 }
 
@@ -399,11 +505,12 @@ function onKeyDown(e: KeyboardEvent) {
     onCancel();
     return;
   }
-  if ((e.key === "c" || e.key === "C") && !e.ctrlKey && !e.altKey && !e.metaKey) {
+  if (e.key.toLowerCase() === "c" && !e.ctrlKey && !e.altKey && !e.metaKey) {
     e.preventDefault();
-    invoke("copy_text_to_clipboard", { text: hexColor.value });
+    copyTextToClipboard(hexColor.value);
     return;
   }
+  // Check by configured hotkey strings.
   if (matchHotkey(e, copyHotkey.value)) {
     e.preventDefault();
     onCopyRegion();
@@ -419,19 +526,52 @@ function onKeyDown(e: KeyboardEvent) {
     onPinRegion();
     return;
   }
+  if (matchHotkey(e, ocrHotkey.value)) {
+    e.preventDefault();
+    onOcr();
+    return;
+  }
+  // Fallback: match by physical key code (works regardless of hotkey string).
+  // This ensures Ctrl+C/S/T/R always work even if the config value is unusual.
+  if (!e.repeat && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
+    switch (e.code) {
+      case "KeyC":
+        e.preventDefault();
+        onCopyRegion();
+        return;
+      case "KeyS":
+        e.preventDefault();
+        onSaveRegion();
+        return;
+      case "KeyT":
+        e.preventDefault();
+        onPinRegion();
+        return;
+      case "KeyR":
+        e.preventDefault();
+        onOcr();
+        return;
+    }
+  }
 }
 
 onMounted(async () => {
   layerRef.value?.focus();
   window.addEventListener("keydown", onKeyDown);
   try {
-    copyHotkey.value = await invoke("get_copy_hotkey");
-    saveHotkey.value = await invoke("get_save_hotkey");
-    pinHotkey.value = await invoke("get_pin_hotkey");
+    copyHotkey.value = await getCopyHotkey();
+    saveHotkey.value = await getSaveHotkey();
+    pinHotkey.value = await getPinHotkey();
+    ocrHotkey.value = await getOcrHotkey();
+    gifFps.value = await getGifFps();
+    gifQuality.value = await getGifQuality();
   } catch (e) {
     console.error("Failed to load hotkeys:", e);
   }
-  updateMagnifierAndColor(cursorX.value, cursorY.value);
+  updateMagnifierAndColor(
+    toPhysical(cursorX.value, winOffset.value.x),
+    toPhysical(cursorY.value, winOffset.value.y)
+  );
 });
 
 onUnmounted(() => {
@@ -562,6 +702,16 @@ onUnmounted(() => {
 
 .tool-btn:hover {
   background: rgba(255, 255, 255, 0.12);
+}
+
+.tool-btn.recording {
+  background: rgba(255, 50, 50, 0.6);
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 .divider {

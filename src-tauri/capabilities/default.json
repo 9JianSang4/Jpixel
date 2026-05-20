@@ -2,13 +2,15 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": ["main", "pin-*", "editor-*", "capture-*"],
   "permissions": [
     "core:default",
     "opener:default",
     "global-shortcut:default",
     "clipboard-manager:default",
     "dialog:default",
-    "fs:default"
+    "fs:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-size"
   ]
 }

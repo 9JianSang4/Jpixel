@@ -11,15 +11,24 @@
       "Bash(cargo check *)",
       "Bash(npm run *)",
       "Bash(tasklist)",
-      "Bash(taskkill /F /IM jpixel.exe)",
-      "Bash(taskkill /F /IM node.exe)",
       "Bash(git init *)",
       "Bash(git config *)",
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(git remote *)",
       "Bash(git push *)",
-      "Bash(npx vue-tsc *)"
+      "Bash(npx vue-tsc *)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :1420)",
+      "Bash(taskkill *)",
+      "WebSearch",
+      "Bash(cargo build *)",
+      "Bash(xargs grep -l \"PinWindow\\|pinWindow\\|modeless\\|MainWindow\")",
+      "Bash(xargs grep -l \"class Action\")",
+      "Bash(cargo test *)",
+      "Bash(env)",
+      "Bash(bash *)",
+      "Bash(claude status *)"
     ]
   }
 }
