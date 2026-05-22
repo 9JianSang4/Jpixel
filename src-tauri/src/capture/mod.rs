@@ -1,4 +1,3 @@
-pub mod gif;
 pub mod screen;
 
 pub use screen::{default_capture, ScreenCapture, Rect};
@@ -6,28 +5,119 @@ pub use screen::{default_capture, ScreenCapture, Rect};
 use crate::error::{io_err, JpixelError};
 use crate::ocr::OcrEngine;
 use base64::Engine;
-use image::{DynamicImage, ImageOutputFormat};
+use image::{DynamicImage, ImageOutputFormat, Rgba};
+use imageproc::drawing::{draw_filled_circle_mut, draw_line_segment_mut};
 use tauri_plugin_dialog::DialogExt;
 use std::io::Cursor;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 // ─────────────────────────────────────────────────────────────
-// Helpers
+// Stroke compositing (from frontend pen/eraser tools)
 // ─────────────────────────────────────────────────────────────
 
-fn screenshot_dir(app: &AppHandle) -> Result<PathBuf, JpixelError> {
-    let picture_dir = app
-        .path()
-        .picture_dir()
-        .map_err(|e| JpixelError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("Pictures dir: {}", e),
-        )))?;
-    let dir = picture_dir.join("Jpixel");
-    std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
-    Ok(dir)
+/// A single point in a drawing stroke, in physical pixels relative to the region.
+#[derive(serde::Deserialize)]
+pub struct StrokePoint {
+    pub x: f32,
+    pub y: f32,
 }
+
+/// A drawing stroke from the frontend capture overlay.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum StrokeData {
+    Pen {
+        points: Vec<StrokePoint>,
+        color: String,
+        width: f32,
+    },
+    Eraser {
+        points: Vec<StrokePoint>,
+        size: f32,
+    },
+}
+
+fn parse_hex_color(hex: &str) -> Option<Rgba<u8>> {
+    let hex = hex.trim_start_matches('#');
+    match hex.len() {
+        3 => {
+            let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+            let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+            let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+            Some(Rgba([r, g, b, 255]))
+        }
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            Some(Rgba([r, g, b, 255]))
+        }
+        _ => None,
+    }
+}
+
+/// Composite frontend drawing strokes onto a captured image.
+///
+/// Creates a transparent overlay, draws pen strokes on it, applies eraser strokes,
+/// then alpha-blends the result onto the image.
+pub fn composite_strokes(image: &mut image::RgbaImage, strokes_json: &str) -> Result<(), JpixelError> {
+    let strokes: Vec<StrokeData> = serde_json::from_str(strokes_json)
+        .map_err(|e| JpixelError::Image(format!("Failed to parse strokes: {}", e)))?;
+
+    let (w, h) = image.dimensions();
+    let mut overlay = image::RgbaImage::new(w, h);
+
+    for stroke in &strokes {
+        match stroke {
+            StrokeData::Pen { points, color, width } => {
+                let rgba = parse_hex_color(color).unwrap_or(Rgba([255, 0, 0, 255]));
+                let radius = (*width / 2.0).max(0.5);
+                for i in 1..points.len() {
+                    let p0 = (points[i - 1].x, points[i - 1].y);
+                    let p1 = (points[i].x, points[i].y);
+                    draw_line_segment_mut(&mut overlay, p0, p1, rgba);
+                }
+                if !points.is_empty() {
+                    draw_filled_circle_mut(&mut overlay, (points[0].x as i32, points[0].y as i32), radius as i32, rgba);
+                }
+            }
+            StrokeData::Eraser { points, size } => {
+                let transparent = Rgba([0, 0, 0, 0]);
+                let radius = (*size / 2.0).max(0.5);
+                for i in 1..points.len() {
+                    draw_line_segment_mut(&mut overlay, (points[i - 1].x, points[i - 1].y), (points[i].x, points[i].y), transparent);
+                }
+                if !points.is_empty() {
+                    draw_filled_circle_mut(&mut overlay, (points[0].x as i32, points[0].y as i32), radius as i32, transparent);
+                }
+            }
+        }
+    }
+
+    // Alpha-blend overlay onto the captured image
+    for y in 0..h {
+        for x in 0..w {
+            let opx = overlay.get_pixel(x, y);
+            if opx[3] > 0 {
+                let a = opx[3] as f32 / 255.0;
+                let ipx = image.get_pixel(x, y);
+                image.put_pixel(x, y, Rgba([
+                    (opx[0] as f32 * a + ipx[0] as f32 * (1.0 - a)).round() as u8,
+                    (opx[1] as f32 * a + ipx[1] as f32 * (1.0 - a)).round() as u8,
+                    (opx[2] as f32 * a + ipx[2] as f32 * (1.0 - a)).round() as u8,
+                    ipx[3],
+                ]));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────
 
 fn temp_jpixel_dir(app: &AppHandle) -> Result<PathBuf, JpixelError> {
     let temp_dir = app
@@ -62,12 +152,20 @@ pub async fn save_region_dialog(
     y: i32,
     width: u32,
     height: u32,
+    strokes: Option<String>,
 ) -> Result<(), JpixelError> {
     crate::window::hide_capture_windows(&app);
 
-    let image = default_capture()
+    let mut image = default_capture()
         .capture_region(Rect { x, y, width, height })
         .map_err(JpixelError::Capture)?;
+
+    // Composite frontend drawings onto the image
+    if let Some(ref s) = strokes {
+        if !s.is_empty() {
+            composite_strokes(&mut image, s)?;
+        }
+    }
 
     // Close the hidden windows so the file dialog shows the desktop behind it.
     crate::window::close_capture_windows(app.clone());
@@ -98,33 +196,6 @@ pub async fn save_region_dialog(
     Ok(())
 }
 
-/// Capture a region, save to Pictures/Jpixel, copy to clipboard, and open editor.
-#[tauri::command]
-pub fn capture_screen_region(
-    app: AppHandle,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-) -> Result<String, JpixelError> {
-    // Hide the overlay before capturing so the magnifier / toolbar are not
-    // included in the screenshot image.
-    crate::window::hide_capture_windows(&app);
-
-    let image = default_capture()
-        .capture_region(Rect { x, y, width, height })
-        .map_err(JpixelError::Capture)?;
-
-    let save_dir = screenshot_dir(&app)?;
-    let filename = timestamp_filename("jpixel", "png");
-    let path = save_dir.join(&filename);
-    image.save(&path).map_err(|e| io_err(&path, e))?;
-
-    copy_image_to_clipboard(&image)?;
-
-    log::info!("Screenshot saved to {:?}", path);
-    Ok(path.to_string_lossy().to_string())
-}
 
 /// Create a pin window from a captured region.
 #[tauri::command]
@@ -134,12 +205,20 @@ pub fn create_pin_from_region(
     y: i32,
     width: u32,
     height: u32,
+    strokes: Option<String>,
 ) -> Result<String, JpixelError> {
     crate::window::hide_capture_windows(&app);
 
-    let image = default_capture()
+    let mut image = default_capture()
         .capture_region(Rect { x, y, width, height })
         .map_err(JpixelError::Capture)?;
+
+    // Composite frontend drawings
+    if let Some(ref s) = strokes {
+        if !s.is_empty() {
+            composite_strokes(&mut image, s)?;
+        }
+    }
 
     let temp_dir = temp_jpixel_dir(&app)?;
     cleanup_temp_pins(&temp_dir);
@@ -245,24 +324,6 @@ pub fn get_magnifier_area(x: i32, y: i32, size: u32) -> Result<String, JpixelErr
 }
 
 // ─────────────────────────────────────────────────────────────
-// Clipboard helper
-// ─────────────────────────────────────────────────────────────
-
-fn copy_image_to_clipboard(image: &image::RgbaImage) -> Result<(), JpixelError> {
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|e| JpixelError::Clipboard(e.to_string()))?;
-    let img_data = arboard::ImageData {
-        width: image.width() as usize,
-        height: image.height() as usize,
-        bytes: std::borrow::Cow::Borrowed(image.as_raw()),
-    };
-    clipboard
-        .set_image(img_data)
-        .map_err(|e| JpixelError::Clipboard(e.to_string()))?;
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────
 // Temp file cleanup
 // ─────────────────────────────────────────────────────────────
 
@@ -312,50 +373,106 @@ pub fn ocr_region(
 }
 
 // ─────────────────────────────────────────────────────────────
-// GIF recording commands
+// Stress tests
 // ─────────────────────────────────────────────────────────────
 
-use crate::capture::gif::GifRecorder;
-use std::sync::{Mutex, OnceLock};
+#[cfg(test)]
+mod stress_tests {
+    use super::*;
 
-fn gif_recorder() -> &'static Mutex<GifRecorder> {
-    static INSTANCE: OnceLock<Mutex<GifRecorder>> = OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(GifRecorder::new()))
+    fn make_test_image(w: u32, h: u32) -> image::RgbaImage {
+        image::RgbaImage::from_pixel(w, h, image::Rgba([200, 200, 200, 255]))
+    }
+
+    fn make_large_strokes(count: usize) -> String {
+        let strokes: Vec<serde_json::Value> = (0..count)
+            .map(|i| {
+                let x = (i * 7 % 1000) as f32;
+                let y = (i * 13 % 800) as f32;
+                serde_json::json!({
+                    "type": "pen",
+                    "points": [
+                        {"x": x, "y": y},
+                        {"x": x + 10.0, "y": y + 10.0},
+                        {"x": x + 20.0, "y": y},
+                    ],
+                    "color": "#FF0000",
+                    "width": 3.0,
+                })
+            })
+            .collect();
+        serde_json::to_string(&strokes).unwrap()
+    }
+
+    /// Composite 500 strokes onto a 1000×800 image.
+    #[test]
+    #[ignore]
+    fn composite_strokes_large() {
+        let mut img = make_test_image(1000, 800);
+        let strokes = make_large_strokes(500);
+        composite_strokes(&mut img, &strokes).unwrap();
+    }
+
+    /// Eraser-only strokes.
+    #[test]
+    #[ignore]
+    fn composite_strokes_eraser() {
+        let mut img = make_test_image(500, 500);
+        let strokes = serde_json::json!([
+            {
+                "type": "eraser",
+                "points": [{"x": 0.0, "y": 0.0}, {"x": 500.0, "y": 500.0}],
+                "size": 20.0
+            }
+        ]);
+        composite_strokes(&mut img, &strokes.to_string()).unwrap();
+    }
+
+    /// Mixed pen/eraser strokes.
+    #[test]
+    #[ignore]
+    fn composite_strokes_mixed() {
+        let mut img = make_test_image(800, 600);
+        let strokes = serde_json::json!([
+            {
+                "type": "pen",
+                "points": [{"x": 10.0, "y": 10.0}, {"x": 100.0, "y": 100.0}],
+                "color": "#00FF00",
+                "width": 5.0
+            },
+            {
+                "type": "eraser",
+                "points": [{"x": 20.0, "y": 20.0}, {"x": 50.0, "y": 50.0}],
+                "size": 15.0
+            }
+        ]);
+        composite_strokes(&mut img, &strokes.to_string()).unwrap();
+    }
+
+    /// Stress: 20 concurrent composite_strokes calls to test pixel-level contention.
+    #[test]
+    #[ignore]
+    fn composite_strokes_concurrent() {
+        const THREADS: usize = 10;
+        let base_img = make_test_image(500, 400);
+        let strokes_json = make_large_strokes(50);
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let img = base_img.clone();
+                let s = strokes_json.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..10 {
+                        let mut copy = img.clone();
+                        composite_strokes(&mut copy, &s).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for (i, h) in handles.into_iter().enumerate() {
+            h.join().expect(&format!("thread {} panicked", i));
+        }
+    }
 }
 
-#[tauri::command]
-pub fn start_gif_record(
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    fps: u8,
-    scale: f32,
-    quality: u8,
-) -> Result<(), JpixelError> {
-    let mut recorder = gif_recorder().lock().map_err(|_| {
-        JpixelError::Gif(crate::error::GifError::External("GIF recorder mutex poisoned".to_string()))
-    })?;
-    recorder
-        .start(Rect { x, y, width, height }, fps, scale, quality)
-        .map_err(JpixelError::Gif)
-}
-
-#[tauri::command]
-pub fn stop_gif_record(
-    app: AppHandle,
-) -> Result<String, JpixelError> {
-    let mut recorder = gif_recorder().lock().map_err(|_| {
-        JpixelError::Gif(crate::error::GifError::External("GIF recorder mutex poisoned".to_string()))
-    })?;
-
-    let save_dir = screenshot_dir(&app)?;
-    let filename = timestamp_filename("jpixel", "gif");
-    let path = save_dir.join(&filename);
-
-    recorder
-        .stop(path.clone())
-        .map_err(JpixelError::Gif)?;
-
-    Ok(path.to_string_lossy().to_string())
-}

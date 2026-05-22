@@ -17,40 +17,60 @@ export interface RgbColor {
   b: number;
 }
 
-export async function captureScreenRegion(
-  x: number,
-  y: number,
-  width: number,
-  height: number
-): Promise<string> {
-  return invoke("capture_screen_region", { x, y, width, height });
+export interface StrokePoint {
+  x: number;
+  y: number;
+}
+
+export interface PenStroke {
+  type: "pen";
+  points: StrokePoint[];
+  color: string;
+  width: number;
+}
+
+export interface EraserStroke {
+  type: "eraser";
+  points: StrokePoint[];
+  size: number;
+}
+
+export type DrawStroke = PenStroke | EraserStroke;
+
+/** Serialise drawing strokes to a JSON string for the backend. */
+export function strokesToJson(strokes: DrawStroke[]): string | null {
+  if (strokes.length === 0) return null;
+  return JSON.stringify(strokes);
 }
 
 export async function createPinFromRegion(
   x: number,
   y: number,
   width: number,
-  height: number
+  height: number,
+  strokes?: DrawStroke[]
 ): Promise<string> {
-  return invoke("create_pin_from_region", { x, y, width, height });
+  return invoke("create_pin_from_region", { x, y, width, height, strokes: strokes ? JSON.stringify(strokes) : null });
 }
 
 export async function saveRegionDialog(
   x: number,
   y: number,
   width: number,
-  height: number
+  height: number,
+  strokes?: DrawStroke[]
 ): Promise<void> {
-  return invoke("save_region_dialog", { x, y, width, height });
+  return invoke("save_region_dialog", { x, y, width, height, strokes: strokes ? JSON.stringify(strokes) : null });
 }
 
 export async function copyRegionToClipboard(
   x: number,
   y: number,
   width: number,
-  height: number
+  height: number,
+  strokes?: DrawStroke[]
 ): Promise<void> {
-  return invoke("copy_region_to_clipboard", { x, y, width, height });
+  return invoke("copy_region_to_clipboard", { x, y, width, height, strokes: strokes ? JSON.stringify(strokes) : null });
 }
 
 export async function readImageBase64(path: string): Promise<string> {
@@ -76,22 +96,6 @@ export async function ocrRegion(
   height: number
 ): Promise<string> {
   return invoke("ocr_region", { x, y, width, height });
-}
-
-export async function startGifRecord(
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  fps: number,
-  scale: number,
-  quality: number
-): Promise<void> {
-  return invoke("start_gif_record", { x, y, width, height, fps, scale, quality });
-}
-
-export async function stopGifRecord(): Promise<string> {
-  return invoke("stop_gif_record");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -140,22 +144,6 @@ export async function setScreenshotHotkey(hotkey: string): Promise<void> {
 
 export async function getCopyHotkey(): Promise<string> {
   return invoke("get_copy_hotkey");
-}
-
-export async function getGifFps(): Promise<number> {
-  return invoke("get_gif_fps");
-}
-
-export async function setGifFps(fps: number): Promise<void> {
-  return invoke("set_gif_fps", { fps });
-}
-
-export async function getGifQuality(): Promise<number> {
-  return invoke("get_gif_quality");
-}
-
-export async function setGifQuality(quality: number): Promise<void> {
-  return invoke("set_gif_quality", { quality });
 }
 
 export async function setCopyHotkey(hotkey: string): Promise<void> {

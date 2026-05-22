@@ -21,7 +21,6 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
-tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 screenshots = "0.8"
@@ -36,5 +35,4 @@ log = "0.4"
 env_logger = "0.11"
 single-instance = "0.3"
 thiserror = "1"
-gif = "0.13"
 

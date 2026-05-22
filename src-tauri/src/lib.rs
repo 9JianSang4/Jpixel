@@ -176,7 +176,6 @@ pub fn run() {
                 })
                 .build(),
         )
-        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(config.clone())
@@ -189,15 +188,12 @@ pub fn run() {
             window::create_pin_window,
             window::close_pin_window,
             // Capture
-            capture::capture_screen_region,
             capture::create_pin_from_region,
             capture::read_image_base64,
             capture::save_region_dialog,
             capture::get_pixel_color,
             capture::get_magnifier_area,
             capture::ocr_region,
-            capture::start_gif_record,
-            capture::stop_gif_record,
             // Config
             config::get_double_press_enabled,
             config::set_double_press_enabled,
@@ -213,10 +209,6 @@ pub fn run() {
             config::set_ocr_hotkey,
             config::get_default_action,
             config::set_default_action,
-            config::get_gif_fps,
-            config::set_gif_fps,
-            config::get_gif_quality,
-            config::set_gif_quality,
             // Clipboard
             clipboard::copy_region_to_clipboard,
             clipboard::copy_text_to_clipboard,

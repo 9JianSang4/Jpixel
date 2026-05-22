@@ -14,9 +14,6 @@ pub enum JpixelError {
     #[error("OCR 识别失败: {0}")]
     Ocr(#[from] OcrError),
 
-    #[error("GIF 录制失败: {0}")]
-    Gif(#[from] GifError),
-
     #[error("剪贴板操作失败: {0}")]
     Clipboard(String),
 
@@ -65,25 +62,6 @@ pub enum OcrError {
     #[error("识别失败: {0}")]
     Recognition(String),
 }
-
-#[derive(Error, Debug)]
-pub enum GifError {
-    #[error("录制已在进行中")]
-    AlreadyRecording,
-
-    #[error("未在录制状态")]
-    NotRecording,
-
-    #[error("录制超时 (最大 {0} 秒)")]
-    Timeout(u16),
-
-    #[error("编码失败: {0}")]
-    Encode(String),
-
-    #[error("外部库错误: {0}")]
-    External(String),
-}
-
 /// Helper to map generic errors into `JpixelError::Io` with context.
 pub fn io_err(path: impl Into<PathBuf>, err: impl std::fmt::Display) -> JpixelError {
     let path = path.into();

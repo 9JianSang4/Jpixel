@@ -31,10 +31,6 @@ pub struct AppConfig {
     pub ocr_hotkey: String,
     #[serde(default)]
     pub default_action: DefaultAction,
-    #[serde(default = "default_gif_fps")]
-    pub gif_fps: u8,
-    #[serde(default = "default_gif_quality")]
-    pub gif_quality: u8,
 }
 
 fn default_hotkey_f1() -> String { "F1".to_string() }
@@ -42,8 +38,6 @@ fn default_hotkey_ctrl_c() -> String { "Ctrl+C".to_string() }
 fn default_hotkey_ctrl_s() -> String { "Ctrl+S".to_string() }
 fn default_hotkey_ctrl_t() -> String { "Ctrl+T".to_string() }
 fn default_hotkey_ctrl_r() -> String { "Ctrl+R".to_string() }
-fn default_gif_fps() -> u8 { 10 }
-fn default_gif_quality() -> u8 { 128 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -70,8 +64,6 @@ impl Default for AppConfig {
             pin_hotkey: "Ctrl+T".to_string(),
             ocr_hotkey: "Ctrl+R".to_string(),
             default_action: DefaultAction::SaveAndEdit,
-            gif_fps: 10,
-            gif_quality: 128,
         }
     }
 }
@@ -210,11 +202,6 @@ config_getter!(get_ocr_hotkey, ocr_hotkey, String);
 config_getter!(get_default_action, default_action, DefaultAction);
 config_setter!(set_default_action, default_action, DefaultAction);
 
-config_getter!(get_gif_fps, gif_fps, u8);
-config_setter!(set_gif_fps, gif_fps, u8);
-
-config_getter!(get_gif_quality, gif_quality, u8);
-config_setter!(set_gif_quality, gif_quality, u8);
 
 /// Update a hotkey and re-register it with the OS.
 ///
@@ -321,8 +308,6 @@ mod tests {
         assert_eq!(cfg.pin_hotkey, "Ctrl+T");
         assert_eq!(cfg.ocr_hotkey, "Ctrl+R");
         assert_eq!(cfg.default_action, DefaultAction::SaveAndEdit);
-        assert_eq!(cfg.gif_fps, 10);
-        assert_eq!(cfg.gif_quality, 128);
     }
 
     #[test]
@@ -337,7 +322,6 @@ mod tests {
         let restored: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg.screenshot_hotkey, restored.screenshot_hotkey);
         assert_eq!(cfg.default_action, restored.default_action);
-        assert_eq!(cfg.gif_quality, restored.gif_quality);
     }
 
     #[test]
@@ -346,7 +330,6 @@ mod tests {
         let cfg: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.screenshot_hotkey, "F2");
         assert_eq!(cfg.copy_hotkey, "Ctrl+C"); // default
-        assert_eq!(cfg.gif_fps, 10); // default
         assert_eq!(cfg.default_action, DefaultAction::SaveAndEdit); // default
     }
 
@@ -357,7 +340,5 @@ mod tests {
         assert_eq!(default_hotkey_ctrl_s(), "Ctrl+S");
         assert_eq!(default_hotkey_ctrl_t(), "Ctrl+T");
         assert_eq!(default_hotkey_ctrl_r(), "Ctrl+R");
-        assert_eq!(default_gif_fps(), 10);
-        assert_eq!(default_gif_quality(), 128);
     }
 }

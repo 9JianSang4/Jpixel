@@ -3,28 +3,46 @@
     <!-- Toolbar -->
     <div class="toolbar">
       <button
-        v-for="t in tools"
-        :key="t.id"
         class="tool-btn"
-        :class="{ active: currentTool === t.id }"
-        @click="selectTool(t.id)"
-        :title="t.label"
+        :class="{ active: currentTool === 'pen' }"
+        @click="selectTool('pen')"
+        title="画笔"
       >
-        <span>{{ t.icon }}</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/>
+        </svg>
+      </button>
+      <button
+        class="tool-btn"
+        :class="{ active: currentTool === 'eraser' }"
+        @click="selectTool('eraser')"
+        title="擦除"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M20 20H7L3 16c-.8-.8-.8-2 0-2.8l9.2-9.2c.8-.8 2-.8 2.8 0L20 8.8c.8.8.8 2 0 2.8L11 20"/>
+        </svg>
       </button>
       <div class="divider" />
       <button class="tool-btn" @click="undo" title="撤销 (Ctrl+Z)">
-        <span>↩</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+        </svg>
       </button>
       <button class="tool-btn" @click="clearAll" title="清空">
-        <span>🗑</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+        </svg>
       </button>
       <div class="divider" />
       <button class="tool-btn" @click="saveImage" title="保存">
-        <span>💾</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+        </svg>
       </button>
       <button class="tool-btn" @click="copyImage" title="复制">
-        <span>📋</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
       </button>
     </div>
 
@@ -43,30 +61,12 @@
         @mousedown="onMouseDown"
         @mousemove="onMouseMove"
         @mouseup="onMouseUp"
-        @click="onCanvasClick"
+        @mouseleave="onMouseUp"
       />
-      <div v-else class="placeholder">Loading image...</div>
+      <div v-else class="placeholder">加载中...</div>
     </div>
 
-    <!-- Text input overlay -->
-    <div
-      v-if="textInput.visible"
-      class="text-input-overlay"
-      :style="{
-        left: textInput.x + 'px',
-        top: textInput.y + 'px',
-      }"
-    >
-      <input
-        ref="textInputRef"
-        v-model="textInput.value"
-        @keydown.enter="commitText"
-        @blur="commitText"
-        :style="{ color: strokeColor, fontSize: textSize + 'px' }"
-      />
-    </div>
-
-    <!-- Color picker -->
+    <!-- Color / size bar -->
     <div class="color-bar">
       <button
         v-for="c in colors"
@@ -78,20 +78,16 @@
       />
       <div class="divider" />
       <label>粗细</label>
-      <input type="range" min="1" max="10" v-model.number="strokeWidth" />
-      <div class="divider" />
-      <label>字号</label>
-      <input type="range" min="12" max="48" v-model.number="textSize" />
+      <input type="range" min="1" max="20" v-model.number="strokeWidth" />
+      <span class="size-label">{{ strokeWidth }}px</span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, onMounted } from "vue";
 import { useRoute } from "vue-router";
-import {
-  readImageBase64,
-} from "../api/ipc";
+import { readImageBase64 } from "../api/ipc";
 
 // ─────────────────────────────────────────────────────────────
 // Refs
@@ -101,29 +97,19 @@ const editorRef = ref<HTMLDivElement | null>(null);
 const wrapperRef = ref<HTMLDivElement | null>(null);
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const imgRef = ref<HTMLImageElement | null>(null);
-const textInputRef = ref<HTMLInputElement | null>(null);
 
 const imageSrc = ref("");
-const imagePath = ref("");
 const route = useRoute();
 
 // ─────────────────────────────────────────────────────────────
 // Tool state
 // ─────────────────────────────────────────────────────────────
 
-const tools = [
-  { id: "rect", label: "矩形", icon: "□" },
-  { id: "arrow", label: "箭头", icon: "→" },
-  { id: "text", label: "文字", icon: "T" },
-  { id: "mosaic", label: "马赛克", icon: "▦" },
-] as const;
-
-type ToolId = (typeof tools)[number]["id"];
+type ToolId = "pen" | "eraser";
 
 const currentTool = ref<ToolId | null>(null);
 const strokeColor = ref("#FF0000");
-const strokeWidth = ref(2);
-const textSize = ref(20);
+const strokeWidth = ref(3);
 
 const colors = ["#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FFFFFF", "#000000"];
 
@@ -131,30 +117,29 @@ const colors = ["#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF"
 // Drawing state
 // ─────────────────────────────────────────────────────────────
 
-interface DrawAction {
-  tool: ToolId;
+interface Point {
   x: number;
   y: number;
-  width?: number;
-  height?: number;
-  endX?: number;
-  endY?: number;
-  color: string;
-  strokeWidth?: number;
-  text?: string;
-  fontSize?: number;
 }
 
+interface PenAction {
+  type: "pen";
+  points: Point[];
+  color: string;
+  width: number;
+}
+
+interface EraserAction {
+  type: "eraser";
+  points: Point[];
+  size: number;
+}
+
+type DrawAction = PenAction | EraserAction;
+
 let isDrawing = false;
-let startX = 0;
-let startY = 0;
 const actions = ref<DrawAction[]>([]);
-
-// ─────────────────────────────────────────────────────────────
-// Text input
-// ─────────────────────────────────────────────────────────────
-
-const textInput = ref({ visible: false, x: 0, y: 0, value: "" });
+let currentPoints: Point[] = [];
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -180,89 +165,66 @@ function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   for (const action of actions.value) {
-    ctx.strokeStyle = action.color;
-    ctx.fillStyle = action.color;
-    ctx.lineWidth = action.strokeWidth || 2;
+    if (action.type === "pen") {
+      drawPenStroke(ctx, action.points, action.color, action.width);
+    } else if (action.type === "eraser") {
+      drawEraserStroke(ctx, action.points, action.size);
+    }
+  }
 
-    switch (action.tool) {
-      case "rect":
-        if (action.width && action.height) {
-          ctx.strokeRect(action.x, action.y, action.width, action.height);
-        }
-        break;
-      case "arrow":
-        if (action.endX !== undefined && action.endY !== undefined) {
-          drawArrow(ctx, action.x, action.y, action.endX, action.endY);
-        }
-        break;
-      case "text":
-        if (action.text) {
-          ctx.font = `${action.fontSize || 20}px sans-serif`;
-          ctx.fillStyle = action.color;
-          ctx.fillText(action.text, action.x, action.y);
-        }
-        break;
-      case "mosaic":
-        if (action.width && action.height) {
-          drawMosaic(ctx, action.x, action.y, action.width, action.height);
-        }
-        break;
+  // Draw in-progress stroke
+  if (currentPoints.length > 1) {
+    const tool = currentTool.value;
+    if (tool === "pen") {
+      drawPenStroke(ctx, currentPoints, strokeColor.value, strokeWidth.value);
+    } else if (tool === "eraser") {
+      drawEraserStroke(ctx, currentPoints, strokeWidth.value * 4);
     }
   }
 }
 
-function drawArrow(
+function drawPenStroke(
   ctx: CanvasRenderingContext2D,
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number
+  points: Point[],
+  color: string,
+  width: number,
 ) {
-  const headLen = 12;
-  const angle = Math.atan2(y2 - y1, x2 - x1);
-
-  ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.lineTo(x2, y2);
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.moveTo(x2, y2);
-  ctx.lineTo(
-    x2 - headLen * Math.cos(angle - Math.PI / 6),
-    y2 - headLen * Math.sin(angle - Math.PI / 6)
-  );
-  ctx.lineTo(
-    x2 - headLen * Math.cos(angle + Math.PI / 6),
-    y2 - headLen * Math.sin(angle + Math.PI / 6)
-  );
-  ctx.lineTo(x2, y2);
-  ctx.fill();
-}
-
-function drawMosaic(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number
-) {
-  const BLOCK_SIZE = 8;
+  if (points.length < 2) return;
   ctx.save();
-  for (let iy = y; iy < y + h; iy += BLOCK_SIZE) {
-    for (let ix = x; ix < x + w; ix += BLOCK_SIZE) {
-      const bh = Math.min(BLOCK_SIZE, y + h - iy);
-      const bw = Math.min(BLOCK_SIZE, x + w - ix);
-      // Deterministic pseudo-random color based on block position
-      // so redraws don't flicker.
-      const seed = (ix * 73856093) ^ (iy * 19349663);
-      const r = 100 + (Math.abs(seed) % 50);
-      const g = 100 + (Math.abs(seed * 7) % 50);
-      const b = 100 + (Math.abs(seed * 13) % 50);
-      ctx.fillStyle = `rgba(${r},${g},${b},0.8)`;
-      ctx.fillRect(ix, iy, bw, bh);
-    }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.globalCompositeOperation = "source-over";
+
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y);
   }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEraserStroke(
+  ctx: CanvasRenderingContext2D,
+  points: Point[],
+  size: number,
+) {
+  if (points.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = "rgba(0,0,0,1)";
+  ctx.lineWidth = size;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.globalCompositeOperation = "destination-out";
+
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y);
+  }
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -271,11 +233,7 @@ function drawMosaic(
 // ─────────────────────────────────────────────────────────────
 
 function selectTool(tool: ToolId) {
-  if (currentTool.value === tool) {
-    currentTool.value = null;
-  } else {
-    currentTool.value = tool;
-  }
+  currentTool.value = currentTool.value === tool ? null : tool;
 }
 
 function onImageLoad() {
@@ -288,102 +246,40 @@ function onImageLoad() {
 }
 
 function onMouseDown(e: MouseEvent) {
-  if (!currentTool.value || currentTool.value === "text") return;
+  if (!currentTool.value) return;
   const pos = getCanvasCoords(e);
   isDrawing = true;
-  startX = pos.x;
-  startY = pos.y;
+  currentPoints = [pos];
 }
 
 function onMouseMove(e: MouseEvent) {
   if (!isDrawing || !currentTool.value) return;
   const pos = getCanvasCoords(e);
-
+  currentPoints.push(pos);
   redraw();
-
-  const ctx = canvasRef.value!.getContext("2d")!;
-  ctx.strokeStyle = strokeColor.value;
-  ctx.fillStyle = strokeColor.value;
-  ctx.lineWidth = strokeWidth.value;
-
-  const x = Math.min(startX, pos.x);
-  const y = Math.min(startY, pos.y);
-  const w = Math.abs(pos.x - startX);
-  const h = Math.abs(pos.y - startY);
-
-  switch (currentTool.value) {
-    case "rect":
-      ctx.strokeRect(x, y, w, h);
-      break;
-    case "arrow":
-      drawArrow(ctx, startX, startY, pos.x, pos.y);
-      break;
-    case "mosaic":
-      drawMosaic(ctx, x, y, w, h);
-      break;
-  }
 }
 
-function onMouseUp(e: MouseEvent) {
+function onMouseUp() {
   if (!isDrawing || !currentTool.value) return;
   isDrawing = false;
-  const pos = getCanvasCoords(e);
 
-  const x = Math.min(startX, pos.x);
-  const y = Math.min(startY, pos.y);
-  const w = Math.abs(pos.x - startX);
-  const h = Math.abs(pos.y - startY);
-
-  if (w < 2 && h < 2) {
-    redraw();
-    return;
-  }
-
-  actions.value.push({
-    tool: currentTool.value,
-    x,
-    y,
-    width: w,
-    height: h,
-    endX: pos.x,
-    endY: pos.y,
-    color: strokeColor.value,
-    strokeWidth: strokeWidth.value,
-  });
-
-  redraw();
-}
-
-function onCanvasClick(e: MouseEvent) {
-  if (currentTool.value !== "text") return;
-  const pos = getCanvasCoords(e);
-  textInput.value = {
-    visible: true,
-    x: e.clientX,
-    y: e.clientY,
-    value: "",
-  };
-  startX = pos.x;
-  startY = pos.y;
-  setTimeout(() => textInputRef.value?.focus(), 0);
-}
-
-function commitText() {
-  if (!textInput.value.visible) return;
-  const text = textInput.value.value.trim();
-  if (text) {
+  if (currentTool.value === "pen") {
     actions.value.push({
-      tool: "text",
-      x: startX,
-      y: startY + textSize.value,
+      type: "pen",
+      points: [...currentPoints],
       color: strokeColor.value,
-      text,
-      fontSize: textSize.value,
+      width: strokeWidth.value,
     });
-    redraw();
+  } else if (currentTool.value === "eraser") {
+    actions.value.push({
+      type: "eraser",
+      points: [...currentPoints],
+      size: strokeWidth.value * 4,
+    });
   }
-  textInput.value.visible = false;
-  textInput.value.value = "";
+
+  currentPoints = [];
+  redraw();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -422,7 +318,6 @@ async function saveImage() {
   const dataUrl = getMergedImage();
   if (!dataUrl) return;
 
-  // Convert data URL to blob and trigger download
   const response = await fetch(dataUrl);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
@@ -446,7 +341,6 @@ async function copyImage() {
     ]);
   } catch (e) {
     console.error("Copy image failed:", e);
-    alert("复制图片失败，请检查浏览器剪贴板权限。");
   }
 }
 
@@ -468,17 +362,12 @@ onMounted(async () => {
   editorRef.value?.focus();
   const path = route.query.path as string | undefined;
   if (path) {
-    imagePath.value = path;
     try {
       imageSrc.value = await readImageBase64(path);
     } catch (e) {
       console.error("Failed to load image:", e);
     }
   }
-});
-
-onUnmounted(() => {
-  // cleanup
 });
 </script>
 
@@ -593,17 +482,9 @@ onUnmounted(() => {
   border-color: #fff;
 }
 
-.text-input-overlay {
-  position: fixed;
-  z-index: 100;
-}
-
-.text-input-overlay input {
-  background: transparent;
-  border: 1px dashed #fff;
-  outline: none;
-  padding: 2px 4px;
-  font-family: sans-serif;
-  min-width: 60px;
+.size-label {
+  color: #aaa;
+  font-size: 12px;
+  min-width: 32px;
 }
 </style>

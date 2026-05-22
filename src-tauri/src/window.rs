@@ -25,7 +25,8 @@ pub fn hide_capture_windows(app: &AppHandle) {
         }
     }
     // Allow the compositor to finish a frame without the overlay.
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    // ~6 frames at 60 FPS — enough for DWM to compose a frame without overlays
+    std::thread::sleep(std::time::Duration::from_millis(100));
 }
 
 /// Iterate all `capture-*` windows and call `.close()` on each.

@@ -31,29 +31,52 @@
 
     <!-- Floating toolbar -->
     <div v-if="hasSelection" class="toolbar" :style="toolbarStyle" @mousedown.stop @mouseup.stop>
-      <button class="tool-btn" @click.stop="onConfirm" title="确认 (Enter/双击)">
+      <button class="tool-btn" @click.stop="onConfirm" title="复制到剪贴板 (Enter)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+      </button>
+      <div class="divider" />
+      <button
+        class="tool-btn"
+        :class="{ active: annotationTool === 'pen' }"
+        @click.stop="selectAnnotationTool('pen')"
+        title="画笔"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/>
+        </svg>
+      </button>
+      <button
+        class="tool-btn"
+        :class="{ active: annotationTool === 'eraser' }"
+        @click.stop="selectAnnotationTool('eraser')"
+        title="擦除"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M20 20H7L3 16c-.8-.8-.8-2 0-2.8l9.2-9.2c.8-.8 2-.8 2.8 0L20 8.8c.8.8.8 2 0 2.8L11 20"/>
+        </svg>
       </button>
       <div class="divider" />
       <button class="tool-btn" @click.stop="onOcr" title="文字识别 (Ctrl+R)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
-      </button>
-      <button
-        class="tool-btn"
-        :class="{ recording: isRecordingGif }"
-        @click.stop="onGifRecord"
-        :title="isRecordingGif ? '停止录制' : 'GIF 录制'"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle v-if="!isRecordingGif" cx="12" cy="12" r="10"/><circle v-else cx="12" cy="12" r="4" fill="currentColor"/>
-          <path v-if="!isRecordingGif" d="M12 6v6l4 2"/>
-        </svg>
       </button>
       <div class="divider" />
       <button class="tool-btn" @click.stop="onCancel" title="取消 (Esc)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
+
+    <!-- Drawing canvas overlay (always shown when selected, pointer-events via class) -->
+    <canvas
+      v-show="hasSelection"
+      ref="drawCanvasRef"
+      class="draw-canvas"
+      :class="{ active: !!annotationTool }"
+      :style="selectionStyle"
+      @mousedown.stop="onDrawStart"
+      @mousemove.stop="onDrawMove"
+      @mouseup.stop="onDrawEnd"
+      @mouseleave.stop="onDrawEnd"
+    />
 
     <!-- Magnifier + Color picker -->
     <div v-if="showMagnifier" class="magnifier" :style="magnifierStyle">
@@ -69,27 +92,23 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useRoute } from "vue-router";
 import {
-  captureScreenRegion,
   copyRegionToClipboard,
   saveRegionDialog,
   createPinFromRegion,
-  createEditorWindow,
   closeCaptureWindows,
   copyTextToClipboard,
   getPixelColor,
   getMagnifierArea,
   ocrRegion,
-  startGifRecord,
-  stopGifRecord,
   getCopyHotkey,
   getSaveHotkey,
   getPinHotkey,
   getOcrHotkey,
-  getGifFps,
-  getGifQuality,
+  DrawStroke,
+  StrokePoint,
 } from "../api/ipc";
 
 const layerRef = ref<HTMLDivElement | null>(null);
@@ -111,14 +130,18 @@ const cursorStyle = ref('crosshair');
 const pixelColor = ref({ r: 0, g: 0, b: 0 });
 const magnifierSrc = ref("");
 const showMagnifier = ref(true);
-const isRecordingGif = ref(false);
+
+// Annotation (pen / eraser) state
+const drawCanvasRef = ref<HTMLCanvasElement | null>(null);
+const annotationTool = ref<"pen" | "eraser" | null>(null);
+const strokes = ref<DrawStroke[]>([]);
+let isDrawingStroke = false;
+let currentStroke: StrokePoint[] = [];
 
 const copyHotkey = ref("Ctrl+C");
 const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
 const ocrHotkey = ref("Ctrl+R");
-const gifFps = ref(10);
-const gifQuality = ref(128);
 const route = useRoute();
 const winOffset = ref({
   x: parseInt((route.query.ox as string) || "0"),
@@ -240,7 +263,11 @@ function zoneToCursor(zone: Zone): string {
   }
 }
 
+let pendingMagnifier = false;
+
 async function updateMagnifierAndColor(x: number, y: number) {
+  if (pendingMagnifier) return;
+  pendingMagnifier = true;
   try {
     const color = await getPixelColor(x, y);
     if (isUnmounted) return;
@@ -253,6 +280,8 @@ async function updateMagnifierAndColor(x: number, y: number) {
     if (!isUnmounted) {
       console.error("Magnifier error:", e);
     }
+  } finally {
+    pendingMagnifier = false;
   }
 }
 
@@ -358,19 +387,8 @@ async function onConfirm() {
     onCancel();
     return;
   }
-  try {
-    const path = await captureScreenRegion(
-      toPhysical(selLeft.value, winOffset.value.x),
-      toPhysical(selTop.value, winOffset.value.y),
-      Math.round(selWidth.value * dpr.value),
-      Math.round(selHeight.value * dpr.value)
-    );
-    await createEditorWindow(path);
-    closeCaptureWindows();
-  } catch (e) {
-    console.error("Capture failed:", e);
-    onCancel();
-  }
+  // Enter / ✓ = copy to clipboard (with drawings composited)
+  await onCopyRegion();
 }
 
 function onCancel() {
@@ -406,7 +424,8 @@ async function onCopyRegion() {
       toPhysical(selLeft.value, winOffset.value.x),
       toPhysical(selTop.value, winOffset.value.y),
       Math.round(selWidth.value * dpr.value),
-      Math.round(selHeight.value * dpr.value)
+      Math.round(selHeight.value * dpr.value),
+      strokes.value.length > 0 ? strokes.value : undefined
     );
     closeCaptureWindows();
   } catch (e) {
@@ -421,7 +440,8 @@ async function onSaveRegion() {
       toPhysical(selLeft.value, winOffset.value.x),
       toPhysical(selTop.value, winOffset.value.y),
       Math.round(selWidth.value * dpr.value),
-      Math.round(selHeight.value * dpr.value)
+      Math.round(selHeight.value * dpr.value),
+      strokes.value.length > 0 ? strokes.value : undefined
     );
   } catch (e) {
     console.error("Save failed:", e);
@@ -435,7 +455,8 @@ async function onPinRegion() {
       toPhysical(selLeft.value, winOffset.value.x),
       toPhysical(selTop.value, winOffset.value.y),
       Math.round(selWidth.value * dpr.value),
-      Math.round(selHeight.value * dpr.value)
+      Math.round(selHeight.value * dpr.value),
+      strokes.value.length > 0 ? strokes.value : undefined
     );
   } catch (e) {
     console.error("Pin failed:", e);
@@ -460,39 +481,134 @@ async function onOcr() {
   }
 }
 
-async function onGifRecord() {
-  if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
+// ── Annotation tools (pen / eraser) ────────────────────────
 
-  if (isRecordingGif.value) {
-    // Stop recording
-    try {
-      const path = await stopGifRecord();
-      alert(`GIF 已保存:\n${path}`);
-      isRecordingGif.value = false;
-      closeCaptureWindows();
-    } catch (e) {
-      console.error("GIF stop failed:", e);
-      alert("GIF 保存失败。");
-      isRecordingGif.value = false;
-    }
-  } else {
-    // Start recording
-    try {
-      await startGifRecord(
-        toPhysical(selLeft.value, winOffset.value.x),
-        toPhysical(selTop.value, winOffset.value.y),
-        Math.round(selWidth.value * dpr.value),
-        Math.round(selHeight.value * dpr.value),
-        gifFps.value,
-        0.5,
-        gifQuality.value
-      );
-      isRecordingGif.value = true;
-    } catch (e) {
-      console.error("GIF start failed:", e);
-      alert("GIF 录制启动失败。");
+function selectAnnotationTool(tool: "pen" | "eraser") {
+  annotationTool.value = annotationTool.value === tool ? null : tool;
+  setTimeout(resizeDrawCanvas, 0);
+}
+
+function resizeDrawCanvas() {
+  const canvas = drawCanvasRef.value;
+  if (!canvas) return;
+  const w = Math.round(selWidth.value * dpr.value);
+  const h = Math.round(selHeight.value * dpr.value);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  redrawDrawings();
+}
+
+function redrawDrawings() {
+  const canvas = drawCanvasRef.value;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  for (const stroke of strokes.value) {
+    if (stroke.type === "pen") {
+      drawPenStroke(ctx, stroke.points, stroke.color, stroke.width);
+    } else {
+      drawEraserStroke(ctx, stroke.points, stroke.size);
     }
   }
+}
+
+function drawPenStroke(
+  ctx: CanvasRenderingContext2D,
+  points: StrokePoint[],
+  color: string,
+  width: number,
+) {
+  if (points.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.globalCompositeOperation = "source-over";
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEraserStroke(
+  ctx: CanvasRenderingContext2D,
+  points: StrokePoint[],
+  size: number,
+) {
+  if (points.length < 2) return;
+  ctx.save();
+  ctx.globalCompositeOperation = "destination-out";
+  ctx.strokeStyle = "rgba(0,0,0,1)";
+  ctx.lineWidth = size;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function getDrawCoords(e: MouseEvent): StrokePoint {
+  return {
+    x: (e.clientX - selLeft.value) * dpr.value,
+    y: (e.clientY - selTop.value) * dpr.value,
+  };
+}
+
+function onDrawStart(e: MouseEvent) {
+  if (e.button !== 0 || !annotationTool.value) return;
+  isDrawingStroke = true;
+  currentStroke = [getDrawCoords(e)];
+}
+
+function onDrawMove(e: MouseEvent) {
+  if (!isDrawingStroke || !annotationTool.value) return;
+  currentStroke.push(getDrawCoords(e));
+  redrawDrawings();
+
+  // Draw in-progress stroke preview
+  const canvas = drawCanvasRef.value;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  if (annotationTool.value === "pen") {
+    drawPenStroke(ctx, currentStroke, "#FF0000", 3);
+  } else {
+    drawEraserStroke(ctx, currentStroke, 12);
+  }
+}
+
+function onDrawEnd() {
+  if (!isDrawingStroke || !annotationTool.value) return;
+  isDrawingStroke = false;
+
+  if (annotationTool.value === "pen") {
+    strokes.value.push({
+      type: "pen",
+      points: [...currentStroke],
+      color: "#FF0000",
+      width: 3,
+    });
+  } else {
+    strokes.value.push({
+      type: "eraser",
+      points: [...currentStroke],
+      size: 12,
+    });
+  }
+  currentStroke = [];
+  redrawDrawings();
 }
 
 function onKeyDown(e: KeyboardEvent) {
@@ -556,6 +672,11 @@ function onKeyDown(e: KeyboardEvent) {
   }
 }
 
+// Resize canvas when selection changes
+watch(hasSelection, (val) => {
+  if (val) setTimeout(resizeDrawCanvas, 0);
+});
+
 onMounted(async () => {
   layerRef.value?.focus();
   window.addEventListener("keydown", onKeyDown);
@@ -564,8 +685,6 @@ onMounted(async () => {
     saveHotkey.value = await getSaveHotkey();
     pinHotkey.value = await getPinHotkey();
     ocrHotkey.value = await getOcrHotkey();
-    gifFps.value = await getGifFps();
-    gifQuality.value = await getGifQuality();
   } catch (e) {
     console.error("Failed to load hotkeys:", e);
   }
@@ -719,6 +838,18 @@ onUnmounted(() => {
   width: 1px;
   height: 18px;
   background: rgba(255, 255, 255, 0.15);
+}
+
+/* Drawing canvas overlay */
+.draw-canvas {
+  position: fixed;
+  z-index: 15;
+  pointer-events: none;
+  image-rendering: auto;
+}
+.draw-canvas.active {
+  pointer-events: auto;
+  cursor: crosshair;
 }
 
 /* Magnifier + Color picker */

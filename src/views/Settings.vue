@@ -105,32 +105,6 @@
         </div>
       </div>
 
-      <h2 style="margin-top: 32px;">GIF 录制</h2>
-      <div class="setting-group">
-        <div class="setting-row">
-          <div class="setting-info">
-            <div class="setting-label">默认帧率</div>
-            <div class="setting-desc">GIF 录制每秒捕获帧数</div>
-          </div>
-          <select v-model.number="gifFps" @change="onGifFpsChange" class="select-input">
-            <option :value="5">5 fps</option>
-            <option :value="10">10 fps</option>
-            <option :value="15">15 fps</option>
-          </select>
-        </div>
-
-        <div class="setting-row">
-          <div class="setting-info">
-            <div class="setting-label">输出质量</div>
-            <div class="setting-desc">GIF 颜色数量（越少文件越小）</div>
-          </div>
-          <select v-model.number="gifQuality" @change="onGifQualityChange" class="select-input">
-            <option :value="64">低 (64色)</option>
-            <option :value="128">中 (128色)</option>
-            <option :value="256">高 (256色)</option>
-          </select>
-        </div>
-      </div>
     </main>
   </div>
 </template>
@@ -150,10 +124,6 @@ import {
   setPinHotkey,
   getOcrHotkey,
   setOcrHotkey,
-  getGifFps,
-  setGifFps,
-  getGifQuality,
-  setGifQuality,
 } from "../api/ipc";
 import { formatHotkey } from "../utils/hotkey";
 
@@ -163,8 +133,6 @@ const copyHotkey = ref("Ctrl+C");
 const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
 const ocrHotkey = ref("Ctrl+R");
-const gifFps = ref(10);
-const gifQuality = ref(128);
 const recordingMode = ref<string | null>(null);
 
 onMounted(async () => {
@@ -175,8 +143,6 @@ onMounted(async () => {
     saveHotkey.value = await getSaveHotkey();
     pinHotkey.value = await getPinHotkey();
     ocrHotkey.value = await getOcrHotkey();
-    gifFps.value = await getGifFps();
-    gifQuality.value = await getGifQuality();
   } catch (e) {
     console.error("Failed to load settings:", e);
   }
@@ -185,18 +151,6 @@ onMounted(async () => {
 function onToggle() {
   setDoublePressEnabled(doublePress.value).catch((err: unknown) => {
     console.error("Failed to set double press:", err);
-  });
-}
-
-function onGifFpsChange() {
-  setGifFps(gifFps.value).catch((err: unknown) => {
-    console.error("Failed to set GIF fps:", err);
-  });
-}
-
-function onGifQualityChange() {
-  setGifQuality(gifQuality.value).catch((err: unknown) => {
-    console.error("Failed to set GIF quality:", err);
   });
 }
 

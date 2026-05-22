@@ -1,5 +1,6 @@
 use crate::error::CaptureError;
 use image::RgbaImage;
+use std::sync::{Mutex, OnceLock};
 
 /// A rectangle in screen coordinates.
 #[derive(Debug, Clone, Copy)]
@@ -8,6 +9,17 @@ pub struct Rect {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+}
+
+/// Global lock that serialises all DXGI screen-capture operations.
+///
+/// The `screenshots` crate creates a fresh `IDXGIOutputDuplication` interface
+/// per call.  Calling `AcquireNextFrame` concurrently from multiple threads
+/// can cause the graphics driver to stall or hang permanently.  This mutex
+/// ensures only one capture is in-flight at any time.
+fn capture_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 /// Abstraction over screen capture backends.
@@ -56,6 +68,10 @@ pub struct ScreenshotsCapture;
 
 impl ScreenCapture for ScreenshotsCapture {
     fn capture_region(&self, rect: Rect) -> Result<RgbaImage, CaptureError> {
+        // Serialise all screen capture through a global lock to prevent
+        // concurrent DXGI Desktop Duplication calls, which can hang the driver.
+        let _lock = capture_lock().lock().unwrap();
+
         let screen = screenshots::Screen::from_point(rect.x, rect.y).map_err(|e| {
             CaptureError::ScreenNotFound(rect.x, rect.y, e.to_string())
         })?;
@@ -71,8 +87,6 @@ impl ScreenCapture for ScreenshotsCapture {
 }
 
 /// Global singleton for the default screen capture backend.
-use std::sync::OnceLock;
-
 static DEFAULT_CAPTURE: OnceLock<ScreenshotsCapture> = OnceLock::new();
 
 pub fn default_capture() -> &'static ScreenshotsCapture {
