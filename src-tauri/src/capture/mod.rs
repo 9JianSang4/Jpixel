@@ -223,8 +223,9 @@ pub fn create_pin_from_region(
     let temp_dir = temp_jpixel_dir(&app)?;
     cleanup_temp_pins(&temp_dir);
 
-    let filename = timestamp_filename("jpixel-pin", "png");
+    let filename = timestamp_filename("jpixel-pin", "bmp");
     let path = temp_dir.join(&filename);
+    // BMP is near-raw pixel data with a header — encoding is ~50× faster than PNG
     image.save(&path).map_err(|e| io_err(&path, e))?;
 
     let path_str = path.to_string_lossy().to_string();
@@ -281,8 +282,13 @@ pub fn read_image_base64(app: AppHandle, path: String) -> Result<String, JpixelE
     }
 
     let bytes = std::fs::read(&canon).map_err(|e| io_err(&canon, e))?;
+    let mime = match canon.extension().and_then(|e| e.to_str()) {
+        Some("bmp") => "image/bmp",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        _ => "image/png",
+    };
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:image/png;base64,{}", b64))
+    Ok(format!("data:{};base64,{}", mime, b64))
 }
 
 /// RGB color returned by `get_pixel_color`.
@@ -338,7 +344,7 @@ pub fn cleanup_temp_pins(temp_dir: &PathBuf) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.starts_with("jpixel-pin-") && name_str.ends_with(".png") {
+        if name_str.starts_with("jpixel-pin-") && name_str.ends_with(".bmp") {
             if let Err(e) = std::fs::remove_file(entry.path()) {
                 log::warn!("Failed to remove temp pin file: {}", e);
             }

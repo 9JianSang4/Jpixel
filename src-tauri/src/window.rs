@@ -19,14 +19,18 @@ fn capture_op_lock() -> &'static Mutex<()> {
 /// without them, so that subsequent screen capture does not include the overlay
 /// UI (magnifier, toolbar, crosshair, selection box, …) in the image.
 pub fn hide_capture_windows(app: &AppHandle) {
+    let mut hidden = false;
     for (label, window) in app.webview_windows() {
         if label.starts_with("capture-") {
             let _ = window.hide();
+            hidden = true;
         }
     }
-    // Allow the compositor to finish a frame without the overlay.
-    // ~6 frames at 60 FPS — enough for DWM to compose a frame without overlays
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Only sleep if there were actually windows to hide — gives DWM ~3 frames
+    // at 60 FPS to compose the desktop without overlay windows.
+    if hidden {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// Iterate all `capture-*` windows and call `.close()` on each.

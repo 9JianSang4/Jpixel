@@ -131,7 +131,7 @@ export async function getDoublePressEnabled(): Promise<boolean> {
 }
 
 export async function setDoublePressEnabled(enabled: boolean): Promise<void> {
-  return invoke("set_double_press_enabled", { enabled });
+  return invoke("set_double_press_enabled", { value: enabled });
 }
 
 export async function getScreenshotHotkey(): Promise<string> {

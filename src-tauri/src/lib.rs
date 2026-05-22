@@ -45,6 +45,8 @@ fn handle_capture_hotkey(app: &AppHandle, config: &ConfigArc, state: &StateArc) 
         cfg.double_press_enabled
     };
 
+    log::debug!("Hotkey pressed, double_press_enabled={}", double_press);
+
     if !double_press {
         let _ = app.emit("trigger-capture", ());
         window::create_capture_window(app.clone());
