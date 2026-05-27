@@ -3,23 +3,18 @@
     class="pin-container"
     data-tauri-drag-region
     @contextmenu.prevent="onClose"
-    @keydown="onKeyDown"
     @wheel.prevent="onWindowWheel"
     @mousedown.left="onMouseDown"
-    tabindex="0"
-    ref="containerRef"
   >
     <div class="img-wrapper" v-if="imageSrc && !loadError">
       <img
         :src="imageSrc"
         draggable="false"
-        @load="onImageLoad"
         @error="onImageError"
         ref="imgRef"
       />
     </div>
     <div v-else-if="loadError" class="placeholder error">图片加载失败，右键关闭</div>
-    <div v-else class="placeholder">贴图窗口</div>
   </div>
 </template>
 
@@ -28,9 +23,9 @@ import { ref, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { listen } from "@tauri-apps/api/event";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 
-const containerRef = ref<HTMLDivElement | null>(null);
 const imageSrc = ref("");
 const loadError = ref(false);
 const baseWidth = ref(0);
@@ -44,8 +39,6 @@ const SCALE_STEP = 0.1;
 const route = useRoute();
 
 onMounted(async () => {
-  containerRef.value?.focus();
-
   let w = parseInt(route.query.width as string) || 400;
   let h = parseInt(route.query.height as string) || 300;
   w = Math.max(10, Math.min(8000, w));
@@ -53,26 +46,37 @@ onMounted(async () => {
   baseWidth.value = w;
   baseHeight.value = h;
 
+	// Listen for the image data on this window's unique event name.
+	// This avoids cross-window event collisions when multiple pins are open.
+	const evt = (route.query.evt as string) || "pin-image-data";
+	const unlisten = await listen<string>(evt, (event) => {
+	    imageSrc.value = event.payload;
+	    unlisten();
+	});
+
+  // Fallback: if the event doesn't arrive (e.g. window was created via a
+  // different code path), load the image via IPC using the path param.
   const path = route.query.path as string | undefined;
   if (path) {
-    try {
-      const base64: string = await invoke("read_image_base64", { path });
-      imageSrc.value = base64;
-    } catch (e) {
-      loadError.value = true;
-      console.error("[Pin] Failed to load image:", e);
-    }
+    // Give the event a head start before falling back to IPC
+    setTimeout(async () => {
+      if (imageSrc.value) return; // Already got it from event
+      try {
+        imageSrc.value = await invoke("read_image_base64", { path });
+      } catch (e) {
+        loadError.value = true;
+        console.error("[Pin] Failed to load image:", e);
+      }
+    }, 200);
   }
 });
-
-function onImageLoad() {
-  // Window size is already set by Rust using the selection dimensions.
-}
 
 function onImageError() {
   loadError.value = true;
   console.error("[Pin] Failed to load image:", imageSrc.value);
 }
+
+let wheelThrottle: ReturnType<typeof setTimeout> | null = null;
 
 function onWindowWheel(e: WheelEvent) {
   const delta = e.deltaY > 0 ? -SCALE_STEP : SCALE_STEP;
@@ -80,12 +84,18 @@ function onWindowWheel(e: WheelEvent) {
   newScale = Math.max(SCALE_MIN, Math.min(SCALE_MAX, newScale));
   scale.value = Math.round(newScale * 100) / 100;
 
-  const win = getCurrentWebviewWindow();
-  const newW = Math.round(baseWidth.value * newScale);
-  const newH = Math.round(baseHeight.value * newScale);
-  win.setSize(new LogicalSize(newW, newH)).catch((err: unknown) => {
-    console.error("[Pin] setSize failed:", err);
-  });
+  // Throttle setSize IPC calls to avoid flooding the event loop during
+  // rapid scroll-wheel input.
+  if (wheelThrottle !== null) return;
+  wheelThrottle = setTimeout(() => {
+    wheelThrottle = null;
+    const win = getCurrentWebviewWindow();
+    const newW = Math.round(baseWidth.value * scale.value);
+    const newH = Math.round(baseHeight.value * scale.value);
+    win.setSize(new LogicalSize(newW, newH)).catch((err: unknown) => {
+      console.error("[Pin] setSize failed:", err);
+    });
+  }, 50);
 }
 
 function onMouseDown(e: MouseEvent) {
@@ -102,13 +112,6 @@ function onClose() {
     win.close().catch(() => {});
   });
 }
-
-function onKeyDown(e: KeyboardEvent) {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    onClose();
-  }
-}
 </script>
 
 <style scoped>
@@ -119,7 +122,7 @@ function onKeyDown(e: KeyboardEvent) {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  background: #000;
+  background: transparent;
   outline: none;
   display: flex;
   align-items: center;

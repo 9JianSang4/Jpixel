@@ -37,12 +37,6 @@ export interface EraserStroke {
 
 export type DrawStroke = PenStroke | EraserStroke;
 
-/** Serialise drawing strokes to a JSON string for the backend. */
-export function strokesToJson(strokes: DrawStroke[]): string | null {
-  if (strokes.length === 0) return null;
-  return JSON.stringify(strokes);
-}
-
 export async function createPinFromRegion(
   x: number,
   y: number,
@@ -89,22 +83,9 @@ export async function getMagnifierArea(
   return invoke("get_magnifier_area", { x, y, size });
 }
 
-export async function ocrRegion(
-  x: number,
-  y: number,
-  width: number,
-  height: number
-): Promise<string> {
-  return invoke("ocr_region", { x, y, width, height });
-}
-
 // ─────────────────────────────────────────────────────────────
 // Window
 // ─────────────────────────────────────────────────────────────
-
-export async function createEditorWindow(imagePath: string): Promise<void> {
-  return invoke("create_editor_window", { imagePath });
-}
 
 export async function closeCaptureWindows(): Promise<void> {
   return invoke("close_capture_windows");
@@ -166,11 +147,19 @@ export async function setPinHotkey(hotkey: string): Promise<void> {
   return invoke("set_pin_hotkey", { hotkey });
 }
 
-export async function getOcrHotkey(): Promise<string> {
-  return invoke("get_ocr_hotkey");
+export async function getAutoLaunch(): Promise<boolean> {
+  return invoke("get_auto_launch");
 }
 
-export async function setOcrHotkey(hotkey: string): Promise<void> {
-  return invoke("set_ocr_hotkey", { hotkey });
+export async function setAutoLaunch(enabled: boolean): Promise<void> {
+  return invoke("set_auto_launch", { value: enabled });
+}
+
+export async function getDefaultAction(): Promise<string> {
+  return invoke("get_default_action");
+}
+
+export async function setDefaultAction(action: string): Promise<void> {
+  return invoke("set_default_action", { value: action });
 }
 

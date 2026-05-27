@@ -3,10 +3,9 @@ pub mod screen;
 pub use screen::{default_capture, ScreenCapture, Rect};
 
 use crate::error::{io_err, JpixelError};
-use crate::ocr::OcrEngine;
 use base64::Engine;
 use image::{DynamicImage, ImageOutputFormat, Rgba};
-use imageproc::drawing::{draw_filled_circle_mut, draw_line_segment_mut};
+use imageproc::drawing::draw_filled_circle_mut;
 use tauri_plugin_dialog::DialogExt;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -59,8 +58,9 @@ fn parse_hex_color(hex: &str) -> Option<Rgba<u8>> {
 
 /// Composite frontend drawing strokes onto a captured image.
 ///
-/// Creates a transparent overlay, draws pen strokes on it, applies eraser strokes,
-/// then alpha-blends the result onto the image.
+/// All strokes (pen and eraser) operate on a separate overlay layer.  The
+/// overlay is alpha-blended onto the original image at the end, so the
+/// eraser only removes pen strokes — the screenshot underneath stays intact.
 pub fn composite_strokes(image: &mut image::RgbaImage, strokes_json: &str) -> Result<(), JpixelError> {
     let strokes: Vec<StrokeData> = serde_json::from_str(strokes_json)
         .map_err(|e| JpixelError::Image(format!("Failed to parse strokes: {}", e)))?;
@@ -72,30 +72,49 @@ pub fn composite_strokes(image: &mut image::RgbaImage, strokes_json: &str) -> Re
         match stroke {
             StrokeData::Pen { points, color, width } => {
                 let rgba = parse_hex_color(color).unwrap_or(Rgba([255, 0, 0, 255]));
-                let radius = (*width / 2.0).max(0.5);
+                let radius = (*width / 2.0).max(0.5) as i32;
+                let step = (radius as f32 * 0.5).max(1.0);
                 for i in 1..points.len() {
-                    let p0 = (points[i - 1].x, points[i - 1].y);
-                    let p1 = (points[i].x, points[i].y);
-                    draw_line_segment_mut(&mut overlay, p0, p1, rgba);
-                }
-                if !points.is_empty() {
-                    draw_filled_circle_mut(&mut overlay, (points[0].x as i32, points[0].y as i32), radius as i32, rgba);
+                    let (x0, y0) = (points[i - 1].x, points[i - 1].y);
+                    let (x1, y1) = (points[i].x, points[i].y);
+                    let dx = x1 - x0;
+                    let dy = y1 - y0;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    let n = (dist / step).ceil() as i32;
+                    for j in 0..=n {
+                        let t = if n == 0 { 0.0 } else { j as f32 / n as f32 };
+                        let cx = (x0 + dx * t) as i32;
+                        let cy = (y0 + dy * t) as i32;
+                        draw_filled_circle_mut(&mut overlay, (cx, cy), radius, rgba);
+                    }
                 }
             }
             StrokeData::Eraser { points, size } => {
                 let transparent = Rgba([0, 0, 0, 0]);
-                let radius = (*size / 2.0).max(0.5);
+                let radius = (*size / 2.0).max(1.0) as i32;
+                let step = (radius as f32 * 0.5).max(1.0);
                 for i in 1..points.len() {
-                    draw_line_segment_mut(&mut overlay, (points[i - 1].x, points[i - 1].y), (points[i].x, points[i].y), transparent);
+                    let (x0, y0) = (points[i - 1].x, points[i - 1].y);
+                    let (x1, y1) = (points[i].x, points[i].y);
+                    let dx = x1 - x0;
+                    let dy = y1 - y0;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    let n = (dist / step).ceil() as i32;
+                    for j in 0..=n {
+                        let t = if n == 0 { 0.0 } else { j as f32 / n as f32 };
+                        let cx = (x0 + dx * t) as i32;
+                        let cy = (y0 + dy * t) as i32;
+                        draw_filled_circle_mut(&mut overlay, (cx, cy), radius, transparent);
+                    }
                 }
-                if !points.is_empty() {
-                    draw_filled_circle_mut(&mut overlay, (points[0].x as i32, points[0].y as i32), radius as i32, transparent);
+                if let Some(last) = points.last() {
+                    draw_filled_circle_mut(&mut overlay, (last.x as i32, last.y as i32), radius, transparent);
                 }
             }
         }
     }
 
-    // Alpha-blend overlay onto the captured image
+    // Alpha-blend the overlay onto the original image.
     for y in 0..h {
         for x in 0..w {
             let opx = overlay.get_pixel(x, y);
@@ -132,6 +151,16 @@ fn temp_jpixel_dir(app: &AppHandle) -> Result<PathBuf, JpixelError> {
     Ok(dir)
 }
 
+fn now_timestamp() -> String {
+    use time::OffsetDateTime;
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    let fmt = time::format_description::parse(
+        "[year]-[month]-[day]-[hour]-[minute]-[second]",
+    )
+    .unwrap();
+    now.format(&fmt).unwrap_or_else(|_| "unknown".into())
+}
+
 fn timestamp_filename(prefix: &str, ext: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -160,15 +189,18 @@ pub async fn save_region_dialog(
         .capture_region(Rect { x, y, width, height })
         .map_err(JpixelError::Capture)?;
 
-    // Composite frontend drawings onto the image
+    // Close hidden windows in background — WebView2 teardown is async
+    // and shouldn't block the file dialog.
+    let app_close = app.clone();
+    std::thread::spawn(move || {
+        crate::window::close_capture_windows(app_close);
+    });
+
     if let Some(ref s) = strokes {
         if !s.is_empty() {
             composite_strokes(&mut image, s)?;
         }
     }
-
-    // Close the hidden windows so the file dialog shows the desktop behind it.
-    crate::window::close_capture_windows(app.clone());
 
     let app_clone = app.clone();
     let file_path: Option<tauri_plugin_dialog::FilePath> =
@@ -177,7 +209,7 @@ pub async fn save_region_dialog(
                 .dialog()
                 .file()
                 .add_filter("PNG Image", &["png"])
-                .set_file_name("screenshot.png")
+                .set_file_name(format!("JpixelFile-{}.png", now_timestamp()))
                 .blocking_save_file()
         })
         .await
@@ -213,7 +245,6 @@ pub fn create_pin_from_region(
         .capture_region(Rect { x, y, width, height })
         .map_err(JpixelError::Capture)?;
 
-    // Composite frontend drawings
     if let Some(ref s) = strokes {
         if !s.is_empty() {
             composite_strokes(&mut image, s)?;
@@ -221,16 +252,17 @@ pub fn create_pin_from_region(
     }
 
     let temp_dir = temp_jpixel_dir(&app)?;
-    cleanup_temp_pins(&temp_dir);
 
     let filename = timestamp_filename("jpixel-pin", "bmp");
     let path = temp_dir.join(&filename);
-    // BMP is near-raw pixel data with a header — encoding is ~50× faster than PNG
     image.save(&path).map_err(|e| io_err(&path, e))?;
 
     let path_str = path.to_string_lossy().to_string();
+    // Close capture windows synchronously before spawning pin window.
+    // This avoids lock contention with the next create_capture_window call
+    // and ensures cleanup happens before the pin window opens.
+    crate::window::close_capture_windows(app.clone());
     crate::window::spawn_pin_window(app.clone(), path_str.clone(), x, y, width, height);
-    crate::window::close_capture_windows(app);
 
     Ok(path_str)
 }
@@ -333,6 +365,17 @@ pub fn get_magnifier_area(x: i32, y: i32, size: u32) -> Result<String, JpixelErr
 // Temp file cleanup
 // ─────────────────────────────────────────────────────────────
 
+pub fn cleanup_temp_pins_on_startup(app: &AppHandle) {
+    let temp_dir = match temp_jpixel_dir(app) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("Cannot resolve temp dir for cleanup: {}", e);
+            return;
+        }
+    };
+    cleanup_temp_pins(&temp_dir);
+}
+
 pub fn cleanup_temp_pins(temp_dir: &PathBuf) {
     let entries = match std::fs::read_dir(temp_dir) {
         Ok(e) => e,
@@ -350,32 +393,6 @@ pub fn cleanup_temp_pins(temp_dir: &PathBuf) {
             }
         }
     }
-}
-
-// ─────────────────────────────────────────────────────────────
-// OCR command
-// ─────────────────────────────────────────────────────────────
-
-#[tauri::command]
-pub fn ocr_region(
-    app: AppHandle,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-) -> Result<String, JpixelError> {
-    crate::window::hide_capture_windows(&app);
-
-    let image = default_capture()
-        .capture_region(Rect { x, y, width, height })
-        .map_err(JpixelError::Capture)?;
-
-    let ocr = crate::ocr::default_ocr();
-    let text = ocr
-        .recognize(&image)
-        .map_err(JpixelError::Ocr)?;
-
-    Ok(text)
 }
 
 // ─────────────────────────────────────────────────────────────

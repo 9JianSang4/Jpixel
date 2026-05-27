@@ -4,11 +4,10 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::ShortcutState;
 
-mod capture;
-mod clipboard;
+pub mod capture;
+pub mod clipboard;
 mod config;
-mod error;
-mod ocr;
+pub mod error;
 mod shortcut;
 mod window;
 
@@ -31,6 +30,9 @@ fn ensure_single_instance() -> bool {
         log::warn!("Another Jpixel instance is already running. Exiting.");
         false
     } else {
+        // Leak the guard so the single-instance lock outlives the process.
+        // Dropping it would release the lock and allow concurrent instances.
+        std::mem::forget(instance);
         true
     }
 }
@@ -48,8 +50,11 @@ fn handle_capture_hotkey(app: &AppHandle, config: &ConfigArc, state: &StateArc) 
     log::debug!("Hotkey pressed, double_press_enabled={}", double_press);
 
     if !double_press {
+        let app_clone = app.clone();
         let _ = app.emit("trigger-capture", ());
-        window::create_capture_window(app.clone());
+        std::thread::spawn(move || {
+            window::create_capture_window(app_clone);
+        });
         return;
     }
 
@@ -67,8 +72,11 @@ fn handle_capture_hotkey(app: &AppHandle, config: &ConfigArc, state: &StateArc) 
     };
 
     if should_trigger {
+        let app_clone = app.clone();
         let _ = app.emit("trigger-capture", ());
-        window::create_capture_window(app.clone());
+        std::thread::spawn(move || {
+            window::create_capture_window(app_clone);
+        });
         return;
     }
 
@@ -91,10 +99,17 @@ fn handle_capture_hotkey(app: &AppHandle, config: &ConfigArc, state: &StateArc) 
 // ─────────────────────────────────────────────────────────────
 
 fn setup_logging() {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .init();
+    // In release builds, do not initialize env_logger — its stderr output
+    // can cause a visible console window when launched at boot from the Run
+    // registry key, even with windows_subsystem="windows". Without a logger
+    // backend the `log` crate macros become no-ops.
+    #[cfg(debug_assertions)]
+    {
+        env_logger::Builder::from_env(
+            env_logger::Env::default().default_filter_or("info"),
+        )
+        .init();
+    }
 }
 
 fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
@@ -168,9 +183,7 @@ pub fn run() {
     let state_for_plugin = hotkey_state.clone();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
+        .plugin(tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
                         handle_capture_hotkey(app, &config_for_plugin, &state_for_plugin);
@@ -179,14 +192,12 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .manage(config.clone())
         .manage(hotkey_state.clone())
         .invoke_handler(tauri::generate_handler![
             // Window
             window::create_capture_window,
             window::close_capture_windows,
-            window::create_editor_window,
             window::create_pin_window,
             window::close_pin_window,
             // Capture
@@ -195,7 +206,6 @@ pub fn run() {
             capture::save_region_dialog,
             capture::get_pixel_color,
             capture::get_magnifier_area,
-            capture::ocr_region,
             // Config
             config::get_double_press_enabled,
             config::set_double_press_enabled,
@@ -207,8 +217,8 @@ pub fn run() {
             config::set_save_hotkey,
             config::get_pin_hotkey,
             config::set_pin_hotkey,
-            config::get_ocr_hotkey,
-            config::set_ocr_hotkey,
+            config::get_auto_launch,
+            config::set_auto_launch,
             config::get_default_action,
             config::set_default_action,
             // Clipboard
@@ -231,6 +241,7 @@ pub fn run() {
 
             setup_main_window(&app_handle);
             shortcut::register_screenshot_hotkey(&app_handle, &hotkey_str);
+            capture::cleanup_temp_pins_on_startup(&app_handle);
 
             log::info!("Jpixel setup completed successfully");
             Ok(())

@@ -2,11 +2,43 @@
   <div class="settings-container">
     <aside class="sidebar">
       <nav>
-        <div class="nav-item active">快捷键</div>
+        <div
+          class="nav-item"
+          :class="{ active: activeSection === 'general' }"
+          @click="activeSection = 'general'"
+        >常规</div>
+        <div
+          class="nav-item"
+          :class="{ active: activeSection === 'shortcuts' }"
+          @click="activeSection = 'shortcuts'"
+        >快捷键</div>
       </nav>
     </aside>
     <main class="content">
-      <h2>快捷键</h2>
+      <!-- 常规 -->
+      <template v-if="activeSection === 'general'">
+        <h2>常规</h2>
+        <div class="setting-group">
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-label">开机自启动</div>
+              <div class="setting-desc">系统启动时自动运行 Jpixel</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" v-model="autoLaunch" @change="onAutoLaunchChange" />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="feedback-footer">
+          BUG反馈：2025886838@qq.com<br />
+          由见桑&amp;Claude Code 制作
+        </div>
+      </template>
+
+      <!-- 快捷键 -->
+      <template v-if="activeSection === 'shortcuts'">
+        <h2>快捷键</h2>
       <div class="setting-group">
         <div class="setting-row">
           <div class="setting-info">
@@ -78,23 +110,6 @@
 
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">OCR 文字识别</div>
-            <div class="setting-desc">框选后按下快捷键识别文字</div>
-          </div>
-          <div
-            class="hotkey-input"
-            :class="{ recording: recordingMode === 'ocr' }"
-            tabindex="0"
-            @click="startRecording('ocr')"
-            @keydown="(e) => onKeyDown(e, 'ocr')"
-            @blur="stopRecording"
-          >
-            {{ recordingMode === 'ocr' ? '按下快捷键...' : ocrHotkey }}
-          </div>
-        </div>
-
-        <div class="setting-row">
-          <div class="setting-info">
             <div class="setting-label">双击防误触</div>
             <div class="setting-desc">需要快速连按两次截图快捷键才会触发</div>
           </div>
@@ -103,8 +118,25 @@
             <span class="slider"></span>
           </label>
         </div>
-      </div>
 
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">默认操作</div>
+            <div class="setting-desc">双击或按 Enter 时执行的操作</div>
+          </div>
+          <select
+            class="select-input"
+            v-model="defaultAction"
+            @change="onDefaultActionChange"
+          >
+            <option value="save_and_edit">{{ actionLabels.save_and_edit }}</option>
+            <option value="copy">{{ actionLabels.copy }}</option>
+            <option value="save">{{ actionLabels.save }}</option>
+            <option value="pin">{{ actionLabels.pin }}</option>
+          </select>
+        </div>
+      </div>
+      </template>
     </main>
   </div>
 </template>
@@ -112,6 +144,8 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import {
+  getAutoLaunch,
+  setAutoLaunch,
   getDoublePressEnabled,
   setDoublePressEnabled,
   getScreenshotHotkey,
@@ -122,35 +156,57 @@ import {
   setSaveHotkey,
   getPinHotkey,
   setPinHotkey,
-  getOcrHotkey,
-  setOcrHotkey,
+  getDefaultAction,
+  setDefaultAction,
 } from "../api/ipc";
 import { formatHotkey } from "../utils/hotkey";
 
+const activeSection = ref("general");
+const autoLaunch = ref(false);
 const doublePress = ref(false);
 const screenshotHotkey = ref("F1");
 const copyHotkey = ref("Ctrl+C");
 const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
-const ocrHotkey = ref("Ctrl+R");
+const defaultAction = ref("save_and_edit");
 const recordingMode = ref<string | null>(null);
+
+const actionLabels: Record<string, string> = {
+  save_and_edit: "保存并编辑",
+  copy: "复制到剪贴板",
+  save: "保存文件",
+  pin: "贴图",
+};
 
 onMounted(async () => {
   try {
+    autoLaunch.value = await getAutoLaunch();
     doublePress.value = await getDoublePressEnabled();
     screenshotHotkey.value = await getScreenshotHotkey();
     copyHotkey.value = await getCopyHotkey();
     saveHotkey.value = await getSaveHotkey();
     pinHotkey.value = await getPinHotkey();
-    ocrHotkey.value = await getOcrHotkey();
+    defaultAction.value = await getDefaultAction();
   } catch (e) {
     console.error("Failed to load settings:", e);
   }
 });
 
+function onAutoLaunchChange() {
+  setAutoLaunch(autoLaunch.value).catch((err: unknown) => {
+    console.error("Failed to set auto launch:", err);
+  });
+}
+
 function onToggle() {
   setDoublePressEnabled(doublePress.value).catch((err: unknown) => {
     console.error("Failed to set double press:", err);
+  });
+}
+
+function onDefaultActionChange() {
+  setDefaultAction(defaultAction.value).catch((err: unknown) => {
+    console.error("Failed to set default action:", err);
   });
 }
 
@@ -172,7 +228,6 @@ const setters: Record<string, SetterEntry> = {
   copy: { ref: copyHotkey, setter: setCopyHotkey },
   save: { ref: saveHotkey, setter: setSaveHotkey },
   pin: { ref: pinHotkey, setter: setPinHotkey },
-  ocr: { ref: ocrHotkey, setter: setOcrHotkey },
 };
 
 function onKeyDown(e: KeyboardEvent, mode: string) {
@@ -371,5 +426,12 @@ input:checked + .slider {
 
 input:checked + .slider:before {
   transform: translateX(20px);
+}
+
+.feedback-footer {
+  margin-top: 32px;
+  font-size: 13px;
+  color: #86868b;
+  line-height: 1.8;
 }
 </style>

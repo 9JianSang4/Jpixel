@@ -11,9 +11,6 @@ pub enum JpixelError {
     #[error("屏幕捕获失败: {0}")]
     Capture(#[from] CaptureError),
 
-    #[error("OCR 识别失败: {0}")]
-    Ocr(#[from] OcrError),
-
     #[error("剪贴板操作失败: {0}")]
     Clipboard(String),
 
@@ -54,14 +51,6 @@ pub enum CaptureError {
     AreaFailed(i32, i32, u32, u32, String),
 }
 
-#[derive(Error, Debug)]
-pub enum OcrError {
-    #[error("OCR 引擎未初始化")]
-    NotInitialized,
-
-    #[error("识别失败: {0}")]
-    Recognition(String),
-}
 /// Helper to map generic errors into `JpixelError::Io` with context.
 pub fn io_err(path: impl Into<PathBuf>, err: impl std::fmt::Display) -> JpixelError {
     let path = path.into();

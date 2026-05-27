@@ -68,21 +68,74 @@ pub struct ScreenshotsCapture;
 
 impl ScreenCapture for ScreenshotsCapture {
     fn capture_region(&self, rect: Rect) -> Result<RgbaImage, CaptureError> {
-        // Serialise all screen capture through a global lock to prevent
-        // concurrent DXGI Desktop Duplication calls, which can hang the driver.
         let _lock = capture_lock().lock().unwrap();
 
-        let screen = screenshots::Screen::from_point(rect.x, rect.y).map_err(|e| {
+        // Fast path: if the region fits inside a single monitor, use the
+        // point-based API which returns the pixel buffer directly (zero copy).
+        // This covers 95%+ of captures and avoids the stitching overhead.
+        if let Ok(screen) = screenshots::Screen::from_point(rect.x, rect.y) {
+            let info = &screen.display_info;
+            let sx = info.x;
+            let sy = info.y;
+            let sw = info.width as i32;
+            let sh = info.height as i32;
+
+            if rect.x >= sx
+                && rect.y >= sy
+                && rect.x + rect.width as i32 <= sx + sw
+                && rect.y + rect.height as i32 <= sy + sh
+            {
+                return screen
+                    .capture_area(rect.x, rect.y, rect.width, rect.height)
+                    .map_err(|e| CaptureError::AreaFailed(rect.x, rect.y, rect.width, rect.height, e.to_string()));
+            }
+        }
+
+        // Slow path: multi-monitor stitching via row-level memcpy.
+        let screens = screenshots::Screen::all().map_err(|e| {
             CaptureError::ScreenNotFound(rect.x, rect.y, e.to_string())
         })?;
 
-        let image = screen
-            .capture_area(rect.x, rect.y, rect.width, rect.height)
-            .map_err(|e| {
-                CaptureError::AreaFailed(rect.x, rect.y, rect.width, rect.height, e.to_string())
-            })?;
+        let mut result = RgbaImage::new(rect.width, rect.height);
+        let dst_stride = rect.width as usize * 4;
 
-        Ok(image)
+        for screen in &screens {
+            let info = &screen.display_info;
+            let sx = info.x;
+            let sy = info.y;
+            let sw = info.width as i32;
+            let sh = info.height as i32;
+
+            let ix = rect.x.max(sx);
+            let iy = rect.y.max(sy);
+            let iw = (rect.x + rect.width as i32).min(sx + sw) - ix;
+            let ih = (rect.y + rect.height as i32).min(sy + sh) - iy;
+
+            if iw <= 0 || ih <= 0 {
+                continue;
+            }
+
+            let captured = screen
+                .capture_area(ix, iy, iw as u32, ih as u32)
+                .map_err(|e| {
+                    CaptureError::AreaFailed(ix, iy, iw as u32, ih as u32, e.to_string())
+                })?;
+
+            let dx = (ix - rect.x) as u32;
+            let dy = (iy - rect.y) as u32;
+            let src_stride = iw as usize * 4;
+            let src_raw = captured.as_raw();
+            let dst_raw = result.as_mut();
+
+            for cy in 0..(ih as u32) {
+                let src_off = cy as usize * src_stride;
+                let dst_off = (dy + cy) as usize * dst_stride + dx as usize * 4;
+                dst_raw[dst_off..dst_off + src_stride]
+                    .copy_from_slice(&src_raw[src_off..src_off + src_stride]);
+            }
+        }
+
+        Ok(result)
     }
 }
 

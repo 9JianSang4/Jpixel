@@ -1,6 +1,18 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::window::Color;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+#[cfg(target_os = "windows")]
+extern "system" {
+    fn DwmFlush() -> i32;
+}
+
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+};
 
 /// Serialise concurrent capture-window operations across IPC threads.
 ///
@@ -15,21 +27,56 @@ fn capture_op_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// Hide all `capture-*` windows and wait for the compositor to finish a frame
-/// without them, so that subsequent screen capture does not include the overlay
-/// UI (magnifier, toolbar, crosshair, selection box, …) in the image.
+/// Hide all `capture-*` windows so the subsequent screen capture doesn't
+/// include the overlay UI.  Uses direct Win32 `ShowWindow(SW_HIDE)` which
+/// is sub-microsecond — avoids the ~40 ms Tauri/Wry/WebView2 abstraction
+/// overhead of `window.hide()`.
 pub fn hide_capture_windows(app: &AppHandle) {
-    let mut hidden = false;
-    for (label, window) in app.webview_windows() {
-        if label.starts_with("capture-") {
-            let _ = window.hide();
-            hidden = true;
-        }
+    let t0 = std::time::Instant::now();
+    let windows: Vec<_> = app.webview_windows()
+        .into_iter()
+        .filter(|(label, _)| label.starts_with("capture-"))
+        .collect();
+    let t_collect = t0.elapsed();
+
+    if windows.is_empty() {
+        return;
     }
-    // Only sleep if there were actually windows to hide — gives DWM ~3 frames
-    // at 60 FPS to compose the desktop without overlay windows.
-    if hidden {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+
+    for (_label, window) in &windows {
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(wh) = window.window_handle() {
+                if let RawWindowHandle::Win32(handle) = wh.as_raw() {
+                    unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::ShowWindow(
+                            windows::Win32::Foundation::HWND(handle.hwnd.get() as isize),
+                            windows::Win32::UI::WindowsAndMessaging::SW_HIDE,
+                        );
+                    }
+                    continue;
+                }
+            }
+        }
+        let _ = window.hide();
+    }
+
+    let t_hide = t0.elapsed();
+    log::info!(
+        "[perf] hide_capture_windows: collect={:?} hide={:?} total={:?} windows={}",
+        t_collect,
+        t_hide - t_collect,
+        t_hide,
+        windows.len()
+    );
+
+    std::thread::yield_now();
+
+    // Wait for DWM compositor to actually render the hidden window state so
+    // that the subsequent screen capture does not include the overlay UI.
+    #[cfg(target_os = "windows")]
+    unsafe {
+        DwmFlush();
     }
 }
 
@@ -110,7 +157,7 @@ pub fn create_capture_window(app: AppHandle) {
             phys_pos.x, phys_pos.y, scale
         );
 
-        if let Err(e) = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        match WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -123,7 +170,14 @@ pub fn create_capture_window(app: AppHandle) {
             .visible(true)
             .build()
         {
-            log::error!("Failed to create capture window {}: {}", label, e);
+            Ok(w) => {
+                // Explicit set_focus after creation avoids Windows foreground-steal
+                // restrictions when another window (pin) was recently focused.
+                let _ = w.set_focus();
+            }
+            Err(e) => {
+                log::error!("Failed to create capture window {}: {}", label, e);
+            }
         }
     }
 }
@@ -136,40 +190,6 @@ pub fn close_capture_windows(app: AppHandle) {
     close_capture_windows_inner(&app);
 }
 
-#[tauri::command]
-pub fn create_editor_window(app: AppHandle, image_path: String) {
-    // Spawn window creation off the IPC thread to avoid WebView2 deadlock.
-    // WebView2's COM apartment threading model deadlocks if we create a new
-    // window while still inside the IPC handler on the same thread.
-    std::thread::spawn(move || {
-        // Yield so the IPC handler can return to the JS caller first.
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        let label = format!(
-            "editor-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        );
-        let encoded = urlencoding::encode(&image_path);
-        let url = format!("/#/editor?path={}", encoded);
-        if let Err(e) = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(false)
-            .title("Jpixel Editor")
-            .inner_size(900.0, 700.0)
-            .center()
-            .visible(true)
-            .build()
-        {
-            log::error!("Failed to create editor window: {}", e);
-        }
-    });
-}
-
 /// Spawn a pin window off the IPC thread to avoid WebView2 deadlock on Windows.
 pub fn spawn_pin_window(
     app: AppHandle,
@@ -179,13 +199,31 @@ pub fn spawn_pin_window(
     width: u32,
     height: u32,
 ) {
+    // Read and encode the image before spawning the thread — the data URL
+    // is ready before the frontend even starts loading.
+    let b64 = std::fs::read(&image_path)
+        .ok()
+        .map(|bytes| {
+            format!(
+                "data:image/bmp;base64,{}",
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
+            )
+        });
+
+    let label = format!(
+        "pin-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+    // Unique event name per pin window so old windows never pick up a
+    // new window's image data.
+    let event_name = format!("pin-image-data-{}", label);
+
     std::thread::spawn(move || {
-        // Give the IPC call time to return before we touch the window system
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Find the monitor containing the pin position to get its DPI scale
-        // factor, so we can convert physical screenshot coordinates to logical
-        // pixels for window positioning.
         let scale = app
             .available_monitors()
             .ok()
@@ -201,37 +239,55 @@ pub fn spawn_pin_window(
             })
             .unwrap_or(1.0);
 
-        // Convert physical pixels to logical pixels
         let logical_x = (x as f64 / scale).floor() as i32;
         let logical_y = (y as f64 / scale).floor() as i32;
         let logical_w = (width as f64 / scale).ceil().max(10.0) as f64;
         let logical_h = (height as f64 / scale).ceil().max(10.0) as f64;
 
-        let label = format!(
-            "pin-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        );
         let encoded = urlencoding::encode(&image_path);
+        // Pass the unique event name to the frontend so it knows what to listen for
         let url = format!(
-            "/#/pin?path={}&width={}&height={}",
-            encoded, logical_w as u32, logical_h as u32
+            "/#/pin?path={}&width={}&height={}&evt={}",
+            encoded, logical_w as u32, logical_h as u32, &event_name
         );
-        if let Err(e) = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        let window = match WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
             .decorations(false)
             .shadow(false)
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
             .always_on_top(true)
             .skip_taskbar(true)
             .resizable(false)
-            .focused(true)
+            .focused(false)
             .position(logical_x as f64, logical_y as f64)
             .inner_size(logical_w, logical_h)
             .visible(true)
             .build()
         {
-            log::error!("Failed to create pin window: {}", e);
+            Ok(w) => w,
+            Err(e) => {
+                log::error!("Failed to create pin window: {}", e);
+                return;
+            }
+        };
+
+        // Pin windows must never steal focus — clicks pass through to the
+        // window but don't activate it.  Drag (via data-tauri-drag-region)
+        // and scroll-wheel zoom still work without activation.
+        #[cfg(target_os = "windows")]
+        if let Ok(wh) = window.window_handle() {
+            if let RawWindowHandle::Win32(handle) = wh.as_raw() {
+                unsafe {
+                    let hwnd = windows::Win32::Foundation::HWND(handle.hwnd.get() as isize);
+                    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+                    SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_NOACTIVATE.0 as i32);
+                }
+            }
+        }
+
+        // Push image data via event for instant render.
+        if let Some(data_url) = b64 {
+            let _ = app.emit_to(&label, &event_name, data_url);
         }
     });
 }

@@ -27,8 +27,8 @@ pub struct AppConfig {
     pub save_hotkey: String,
     #[serde(default = "default_hotkey_ctrl_t")]
     pub pin_hotkey: String,
-    #[serde(default = "default_hotkey_ctrl_r")]
-    pub ocr_hotkey: String,
+    #[serde(default)]
+    pub auto_launch: bool,
     #[serde(default)]
     pub default_action: DefaultAction,
 }
@@ -37,8 +37,6 @@ fn default_hotkey_f1() -> String { "F1".to_string() }
 fn default_hotkey_ctrl_c() -> String { "Ctrl+C".to_string() }
 fn default_hotkey_ctrl_s() -> String { "Ctrl+S".to_string() }
 fn default_hotkey_ctrl_t() -> String { "Ctrl+T".to_string() }
-fn default_hotkey_ctrl_r() -> String { "Ctrl+R".to_string() }
-
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DefaultAction {
@@ -62,7 +60,7 @@ impl Default for AppConfig {
             copy_hotkey: "Ctrl+C".to_string(),
             save_hotkey: "Ctrl+S".to_string(),
             pin_hotkey: "Ctrl+T".to_string(),
-            ocr_hotkey: "Ctrl+R".to_string(),
+            auto_launch: false,
             default_action: DefaultAction::SaveAndEdit,
         }
     }
@@ -197,10 +195,118 @@ config_getter!(get_screenshot_hotkey, screenshot_hotkey, String);
 config_getter!(get_copy_hotkey, copy_hotkey, String);
 config_getter!(get_save_hotkey, save_hotkey, String);
 config_getter!(get_pin_hotkey, pin_hotkey, String);
-config_getter!(get_ocr_hotkey, ocr_hotkey, String);
 
 config_getter!(get_default_action, default_action, DefaultAction);
 config_setter!(set_default_action, default_action, DefaultAction);
+
+config_getter!(get_auto_launch, auto_launch, bool);
+
+
+/// Update the auto-launch registry entry.
+///
+/// On Windows, writes or removes a value under
+/// `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+/// On other platforms this is currently a no-op for the registry side,
+/// but the config value is still persisted.
+#[tauri::command]
+pub fn set_auto_launch(
+    app: AppHandle,
+    config: State<ConfigArc>,
+    value: bool,
+) -> Result<(), JpixelError> {
+    let mut cfg = crate::config::lock_or_warn!(config);
+    cfg.auto_launch = value;
+    let clone = cfg.clone();
+    drop(cfg);
+
+    apply_auto_launch(value)?;
+    save_config(&app, &clone)
+}
+
+
+fn apply_auto_launch(enable: bool) -> Result<(), JpixelError> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::core::w;
+        use windows::Win32::System::Registry::{
+            RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW,
+            HKEY_CURRENT_USER, KEY_WRITE, REG_SZ,
+        };
+        use std::os::windows::ffi::OsStrExt;
+
+        let exe_path = std::env::current_exe()
+            .map_err(|e| JpixelError::Config(format!("Cannot get exe path: {}", e)))?;
+        let exe_wide: Vec<u16> = exe_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let subkey = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        let value_name = w!("Jpixel");
+
+        if enable {
+            let mut hkey = windows::Win32::System::Registry::HKEY::default();
+            let rc = unsafe {
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    subkey,
+                    0,
+                    KEY_WRITE,
+                    &mut hkey,
+                )
+            };
+            if rc.is_err() {
+                return Err(JpixelError::Config(format!(
+                    "Failed to open Run registry key: {:?}", rc
+                )));
+            }
+
+            let rc = unsafe {
+                RegSetValueExW(
+                    hkey,
+                    value_name,
+                    0,
+                    REG_SZ,
+                    Some(std::slice::from_raw_parts(
+                        exe_wide.as_ptr() as *const u8,
+                        exe_wide.len() * 2,
+                    )),
+                )
+            };
+            unsafe { let _ = RegCloseKey(hkey); }
+
+            if rc.is_err() {
+                return Err(JpixelError::Config(format!(
+                    "Failed to set auto-launch registry value: {:?}", rc
+                )));
+            }
+        } else {
+            // Delete the value — ignore missing-key errors
+            let mut hkey = windows::Win32::System::Registry::HKEY::default();
+            let rc = unsafe {
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    subkey,
+                    0,
+                    KEY_WRITE,
+                    &mut hkey,
+                )
+            };
+            if rc.is_ok() {
+                unsafe {
+                    let _ = RegDeleteValueW(hkey, value_name);
+                    let _ = RegCloseKey(hkey);
+                }
+            }
+        }
+    }
+
+    // On non-Windows: no-op. macOS needs a LaunchAgent plist; Linux needs a
+    // .desktop file in ~/.config/autostart/.  Left as future work.
+    let _ = enable;
+    Ok(())
+}
 
 
 /// Update a hotkey and re-register it with the OS.
@@ -227,9 +333,19 @@ pub fn set_screenshot_hotkey(
         let _ = app.global_shortcut().unregister(old);
     }
 
-    app.global_shortcut()
-        .register(new_shortcut)
-        .map_err(|e| JpixelError::InvalidHotkey(format!("Registration failed: {}", e)))?;
+    match app.global_shortcut().register(new_shortcut) {
+        Ok(()) => {}
+        Err(e) => {
+            // Roll back in-memory config so it stays in sync with reality
+            let mut cfg = lock_or_warn!(config);
+            cfg.screenshot_hotkey = old_hotkey.clone();
+            // Re-register the old hotkey (best-effort)
+            if let Ok(old) = parse_shortcut(&old_hotkey) {
+                let _ = app.global_shortcut().register(old);
+            }
+            return Err(JpixelError::InvalidHotkey(format!("Registration failed: {}", e)));
+        }
+    }
 
     save_config(&app, &clone)
 }
@@ -279,21 +395,6 @@ pub fn set_pin_hotkey(
     save_config(&app, &clone)
 }
 
-#[tauri::command]
-pub fn set_ocr_hotkey(
-    app: AppHandle,
-    config: State<ConfigArc>,
-    hotkey: String,
-) -> Result<(), JpixelError> {
-    let _ = parse_shortcut(&hotkey)
-        .map_err(|e| JpixelError::InvalidHotkey(format!("'{}': {}", hotkey, e)))?;
-    let mut cfg = lock_or_warn!(config);
-    cfg.ocr_hotkey = hotkey;
-    let clone = cfg.clone();
-    drop(cfg);
-    save_config(&app, &clone)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,11 +403,11 @@ mod tests {
     fn app_config_default_values() {
         let cfg = AppConfig::default();
         assert!(!cfg.double_press_enabled);
+        assert!(!cfg.auto_launch);
         assert_eq!(cfg.screenshot_hotkey, "F1");
         assert_eq!(cfg.copy_hotkey, "Ctrl+C");
         assert_eq!(cfg.save_hotkey, "Ctrl+S");
         assert_eq!(cfg.pin_hotkey, "Ctrl+T");
-        assert_eq!(cfg.ocr_hotkey, "Ctrl+R");
         assert_eq!(cfg.default_action, DefaultAction::SaveAndEdit);
     }
 
@@ -339,6 +440,5 @@ mod tests {
         assert_eq!(default_hotkey_ctrl_c(), "Ctrl+C");
         assert_eq!(default_hotkey_ctrl_s(), "Ctrl+S");
         assert_eq!(default_hotkey_ctrl_t(), "Ctrl+T");
-        assert_eq!(default_hotkey_ctrl_r(), "Ctrl+R");
     }
 }

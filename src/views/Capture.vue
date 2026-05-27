@@ -31,7 +31,7 @@
 
     <!-- Floating toolbar -->
     <div v-if="hasSelection" class="toolbar" :style="toolbarStyle" @mousedown.stop @mouseup.stop>
-      <button class="tool-btn" @click.stop="onConfirm" title="复制到剪贴板 (Enter)">
+      <button class="tool-btn" @click.stop="onConfirm" title="确认 (Enter)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
       </button>
       <div class="divider" />
@@ -56,10 +56,6 @@
         </svg>
       </button>
       <div class="divider" />
-      <button class="tool-btn" @click.stop="onOcr" title="文字识别 (Ctrl+R)">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
-      </button>
-      <div class="divider" />
       <button class="tool-btn" @click.stop="onCancel" title="取消 (Esc)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
@@ -71,11 +67,23 @@
       ref="drawCanvasRef"
       class="draw-canvas"
       :class="{ active: !!annotationTool }"
-      :style="selectionStyle"
+      :style="[selectionStyle, { cursor: drawCursor }]"
       @mousedown.stop="onDrawStart"
       @mousemove.stop="onDrawMove"
       @mouseup.stop="onDrawEnd"
       @mouseleave.stop="onDrawEnd"
+    />
+
+    <!-- Eraser cursor circle overlay -->
+    <div
+      v-if="annotationTool === 'eraser'"
+      class="eraser-cursor"
+      :style="{
+        left: eraseCursorPos.x + 'px',
+        top: eraseCursorPos.y + 'px',
+        width: eraseCursorCssPx + 'px',
+        height: eraseCursorCssPx + 'px',
+      }"
     />
 
     <!-- Magnifier + Color picker -->
@@ -92,7 +100,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { useRoute } from "vue-router";
 import {
   copyRegionToClipboard,
@@ -102,11 +110,10 @@ import {
   copyTextToClipboard,
   getPixelColor,
   getMagnifierArea,
-  ocrRegion,
   getCopyHotkey,
   getSaveHotkey,
   getPinHotkey,
-  getOcrHotkey,
+  getDefaultAction,
   DrawStroke,
   StrokePoint,
 } from "../api/ipc";
@@ -126,6 +133,18 @@ const dragMode = ref<DragMode>('create');
 const moveOffsetX = ref(0);
 const moveOffsetY = ref(0);
 const cursorStyle = ref('crosshair');
+// Pen uses a custom dot cursor; eraser hides system cursor in favor of a
+// custom <div> overlay so its size can match the actual eraser diameter.
+const penCursorUrl = computed(() => {
+  // 8px filled circle as inline SVG data URL — small and precise
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><circle cx="4" cy="4" r="4" fill="red"/></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 4 4, crosshair`;
+});
+const drawCursor = computed(() => {
+  if (annotationTool.value === 'eraser') return 'none';
+  if (annotationTool.value === 'pen') return penCursorUrl.value;
+  return 'crosshair';
+});
 
 const pixelColor = ref({ r: 0, g: 0, b: 0 });
 const magnifierSrc = ref("");
@@ -137,11 +156,15 @@ const annotationTool = ref<"pen" | "eraser" | null>(null);
 const strokes = ref<DrawStroke[]>([]);
 let isDrawingStroke = false;
 let currentStroke: StrokePoint[] = [];
+const eraseCursorPos = ref({ x: 0, y: 0 });
+const ERASER_SIZE = 12; // physical pixels — must match onDrawEnd
+const PEN_WIDTH = 3; // physical pixels
+const eraseCursorCssPx = computed(() => ERASER_SIZE / dpr.value);
 
 const copyHotkey = ref("Ctrl+C");
 const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
-const ocrHotkey = ref("Ctrl+R");
+const defaultAction = ref("save_and_edit");
 const route = useRoute();
 const winOffset = ref({
   x: parseInt((route.query.ox as string) || "0"),
@@ -178,11 +201,17 @@ const selectionStyle = computed(() => ({
 }));
 
 const toolbarStyle = computed(() => {
-  const top = selBottom.value + 12;
+  const toolbarH = 42; // approximate toolbar height in px
+  const margin = 12;
+  const below = selBottom.value + margin;
+  // If toolbar would overflow the viewport, flip above the selection
+  const top = (below + toolbarH > window.innerHeight)
+    ? selTop.value - toolbarH - margin
+    : below;
   const left = selLeft.value;
   return {
     left: left + "px",
-    top: top + "px",
+    top: Math.max(0, top) + "px",
   };
 });
 
@@ -361,6 +390,15 @@ function onMouseMove(e: MouseEvent) {
 
 function clampSelection() {
   const min = MIN_SELECTION_SIZE;
+  const maxW = window.innerWidth;
+  const maxH = window.innerHeight;
+
+  // Clamp to screen bounds so the backend never receives out-of-bounds coords
+  startX.value = Math.max(0, Math.min(startX.value, maxW - min));
+  startY.value = Math.max(0, Math.min(startY.value, maxH - min));
+  endX.value = Math.max(min, Math.min(endX.value, maxW));
+  endY.value = Math.max(min, Math.min(endY.value, maxH));
+
   if (selWidth.value < min) {
     if (startX.value <= endX.value) {
       endX.value = startX.value + min;
@@ -387,8 +425,21 @@ async function onConfirm() {
     onCancel();
     return;
   }
-  // Enter / ✓ = copy to clipboard (with drawings composited)
-  await onCopyRegion();
+  // Dispatch based on configured default action
+  switch (defaultAction.value) {
+    case "copy":
+      await onCopyRegion();
+      break;
+    case "save":
+      await onSaveRegion();
+      break;
+    case "pin":
+      await onPinRegion();
+      break;
+    default: // save_and_edit or unknown — fall back to save
+      await onSaveRegion();
+      break;
+  }
 }
 
 function onCancel() {
@@ -408,17 +459,31 @@ function matchHotkey(e: KeyboardEvent, hotkey: string): boolean {
   }
   if (key === " ") key = "Space";
   if (key.length === 1) key = key.toUpperCase();
+  // Normalise Space: e.key is " " but config stores "Space"
+  const eventKey = e.key === " " ? "Space" : e.key.toUpperCase();
   return (
     e.ctrlKey === ctrl &&
     e.shiftKey === shift &&
     e.altKey === alt &&
     e.metaKey === meta &&
-    e.key.toUpperCase() === key.toUpperCase()
+    eventKey === key.toUpperCase()
+  );
+}
+
+async function hideOverlayForCapture() {
+  showMagnifier.value = false;
+  annotationTool.value = null;
+  await nextTick();
+  // Double rAF ensures the browser has composited and painted the
+  // updated DOM before the backend screenshots the region.
+  await new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
   );
 }
 
 async function onCopyRegion() {
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
+  await hideOverlayForCapture();
   try {
     await copyRegionToClipboard(
       toPhysical(selLeft.value, winOffset.value.x),
@@ -427,7 +492,6 @@ async function onCopyRegion() {
       Math.round(selHeight.value * dpr.value),
       strokes.value.length > 0 ? strokes.value : undefined
     );
-    closeCaptureWindows();
   } catch (e) {
     console.error("Copy failed:", e);
   }
@@ -435,6 +499,7 @@ async function onCopyRegion() {
 
 async function onSaveRegion() {
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
+  await hideOverlayForCapture();
   try {
     await saveRegionDialog(
       toPhysical(selLeft.value, winOffset.value.x),
@@ -450,6 +515,7 @@ async function onSaveRegion() {
 
 async function onPinRegion() {
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
+  await hideOverlayForCapture();
   try {
     await createPinFromRegion(
       toPhysical(selLeft.value, winOffset.value.x),
@@ -460,24 +526,6 @@ async function onPinRegion() {
     );
   } catch (e) {
     console.error("Pin failed:", e);
-  }
-}
-
-async function onOcr() {
-  if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
-  try {
-    const text = await ocrRegion(
-      toPhysical(selLeft.value, winOffset.value.x),
-      toPhysical(selTop.value, winOffset.value.y),
-      Math.round(selWidth.value * dpr.value),
-      Math.round(selHeight.value * dpr.value)
-    );
-    await copyTextToClipboard(text);
-    alert(`OCR 结果已复制到剪贴板:\n${text}`);
-    closeCaptureWindows();
-  } catch (e) {
-    console.error("OCR failed:", e);
-    alert("OCR 识别失败，请检查 Tesseract 是否已安装并加入 PATH。");
   }
 }
 
@@ -573,7 +621,12 @@ function onDrawStart(e: MouseEvent) {
 }
 
 function onDrawMove(e: MouseEvent) {
+  // Track cursor for eraser visual overlay (CSS translate(-50%,-50%) centers it)
+  eraseCursorPos.value = { x: e.clientX, y: e.clientY };
+
   if (!isDrawingStroke || !annotationTool.value) return;
+  // Suppress magnifier updates during active drawing
+  showMagnifier.value = false;
   currentStroke.push(getDrawCoords(e));
   redrawDrawings();
 
@@ -583,9 +636,9 @@ function onDrawMove(e: MouseEvent) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   if (annotationTool.value === "pen") {
-    drawPenStroke(ctx, currentStroke, "#FF0000", 3);
+    drawPenStroke(ctx, currentStroke, "#FF0000", PEN_WIDTH);
   } else {
-    drawEraserStroke(ctx, currentStroke, 12);
+    drawEraserStroke(ctx, currentStroke, ERASER_SIZE);
   }
 }
 
@@ -598,17 +651,18 @@ function onDrawEnd() {
       type: "pen",
       points: [...currentStroke],
       color: "#FF0000",
-      width: 3,
+      width: PEN_WIDTH,
     });
   } else {
     strokes.value.push({
       type: "eraser",
       points: [...currentStroke],
-      size: 12,
+      size: ERASER_SIZE,
     });
   }
   currentStroke = [];
   redrawDrawings();
+  showMagnifier.value = true;
 }
 
 function onKeyDown(e: KeyboardEvent) {
@@ -627,6 +681,19 @@ function onKeyDown(e: KeyboardEvent) {
     copyTextToClipboard(hexColor.value);
     return;
   }
+  // Pen / eraser shortcuts (only when a selection is active)
+  if (hasSelection.value && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    if (e.key.toLowerCase() === "p") {
+      e.preventDefault();
+      selectAnnotationTool("pen");
+      return;
+    }
+    if (e.key.toLowerCase() === "e") {
+      e.preventDefault();
+      selectAnnotationTool("eraser");
+      return;
+    }
+  }
   // Check by configured hotkey strings.
   if (matchHotkey(e, copyHotkey.value)) {
     e.preventDefault();
@@ -641,11 +708,6 @@ function onKeyDown(e: KeyboardEvent) {
   if (matchHotkey(e, pinHotkey.value)) {
     e.preventDefault();
     onPinRegion();
-    return;
-  }
-  if (matchHotkey(e, ocrHotkey.value)) {
-    e.preventDefault();
-    onOcr();
     return;
   }
   // Fallback: match by physical key code (works regardless of hotkey string).
@@ -664,10 +726,6 @@ function onKeyDown(e: KeyboardEvent) {
         e.preventDefault();
         onPinRegion();
         return;
-      case "KeyR":
-        e.preventDefault();
-        onOcr();
-        return;
     }
   }
 }
@@ -684,7 +742,7 @@ onMounted(async () => {
     copyHotkey.value = await getCopyHotkey();
     saveHotkey.value = await getSaveHotkey();
     pinHotkey.value = await getPinHotkey();
-    ocrHotkey.value = await getOcrHotkey();
+    defaultAction.value = await getDefaultAction();
   } catch (e) {
     console.error("Failed to load hotkeys:", e);
   }
@@ -849,7 +907,6 @@ onUnmounted(() => {
 }
 .draw-canvas.active {
   pointer-events: auto;
-  cursor: crosshair;
 }
 
 /* Magnifier + Color picker */
@@ -930,5 +987,16 @@ onUnmounted(() => {
   font-size: 10px;
   color: rgba(255, 255, 255, 0.4);
   text-align: center;
+}
+
+/* Eraser cursor */
+.eraser-cursor {
+  position: fixed;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.15);
+  pointer-events: none;
+  z-index: 35;
+  transform: translate(-50%, -50%);
 }
 </style>
