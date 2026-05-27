@@ -68,6 +68,15 @@ pub struct ScreenshotsCapture;
 
 impl ScreenCapture for ScreenshotsCapture {
     fn capture_region(&self, rect: Rect) -> Result<RgbaImage, CaptureError> {
+        // Wait for the DWM to finish compositing the current frame before
+        // capturing.  This ensures that any DOM element we just hid in the
+        // frontend has actually disappeared from the screen, preventing
+        // the toolbar / selection box from appearing in screenshots.
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+        }
+
         let _lock = capture_lock().lock().unwrap();
 
         // Fast path: if the region fits inside a single monitor, use the

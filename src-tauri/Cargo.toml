@@ -13,11 +13,12 @@ opt-level = 2
 debug = 1
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 debug-assertions = false
 lto = true
 codegen-units = 1
 strip = true
+panic = "abort"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -53,5 +54,6 @@ windows = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_System_Registry",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Dwm",
 ] }
 

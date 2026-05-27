@@ -100,7 +100,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useRoute } from "vue-router";
 import {
   copyRegionToClipboard,
@@ -471,11 +471,19 @@ function matchHotkey(e: KeyboardEvent, hotkey: string): boolean {
 }
 
 async function hideOverlayForCapture() {
-  showMagnifier.value = false;
-  annotationTool.value = null;
-  await nextTick();
-  // Double rAF ensures the browser has composited and painted the
-  // updated DOM before the backend screenshots the region.
+  // Direct DOM manipulation — synchronous and guaranteed to be
+  // rendered before the next rAF fires. Vue reactivity is too slow
+  // for this use case because WebView2 may capture mid-paint.
+  const root = layerRef.value;
+  if (!root) return;
+  const selectors = ['.toolbar', '.selection-box', '.draw-canvas', '.magnifier', '.eraser-cursor'];
+  const toHide: HTMLElement[] = [];
+  for (const sel of selectors) {
+    const el = root.querySelector(sel) as HTMLElement | null;
+    if (el) toHide.push(el);
+  }
+  for (const el of toHide) el.style.display = 'none';
+  // Double rAF to ensure the composited frame reaches the screen
   await new Promise((resolve) =>
     requestAnimationFrame(() => requestAnimationFrame(resolve))
   );
