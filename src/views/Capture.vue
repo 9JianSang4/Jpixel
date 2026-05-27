@@ -476,7 +476,7 @@ async function hideOverlayForCapture() {
   // for this use case because WebView2 may capture mid-paint.
   const root = layerRef.value;
   if (!root) return;
-  const selectors = ['.toolbar', '.selection-box', '.draw-canvas', '.magnifier', '.eraser-cursor'];
+  const selectors = ['.toolbar', '.selection-box', '.draw-canvas', '.magnifier', '.eraser-cursor', '.overlay'];
   const toHide: HTMLElement[] = [];
   for (const sel of selectors) {
     const el = root.querySelector(sel) as HTMLElement | null;
