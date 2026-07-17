@@ -30,6 +30,15 @@ pub trait ScreenCapture: Send + Sync {
     /// Capture a rectangular region of the screen.
     fn capture_region(&self, rect: Rect) -> Result<RgbaImage, CaptureError>;
 
+    /// Capture without flushing the DWM compositor first.
+    ///
+    /// This is faster and avoids GPU pipeline contention, but should only
+    /// be used when there is no overlay UI to hide — e.g. the initial
+    /// frozen-background capture that happens BEFORE creating windows.
+    fn capture_region_no_flush(&self, rect: Rect) -> Result<RgbaImage, CaptureError> {
+        self.capture_region(rect)
+    }
+
     /// Capture a single pixel color.
     ///
     /// Default implementation delegates to `capture_region` with a 1x1 area.
@@ -77,7 +86,17 @@ impl ScreenCapture for ScreenshotsCapture {
             let _ = windows::Win32::Graphics::Dwm::DwmFlush();
         }
 
-        let _lock = capture_lock().lock().unwrap();
+        self.capture_region_inner(rect)
+    }
+
+    fn capture_region_no_flush(&self, rect: Rect) -> Result<RgbaImage, CaptureError> {
+        self.capture_region_inner(rect)
+    }
+}
+
+impl ScreenshotsCapture {
+    fn capture_region_inner(&self, rect: Rect) -> Result<RgbaImage, CaptureError> {
+        let _lock = crate::config::lock_or_warn!(capture_lock());
 
         // Fast path: if the region fits inside a single monitor, use the
         // point-based API which returns the pixel buffer directly (zero copy).

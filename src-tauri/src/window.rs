@@ -3,6 +3,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri::window::Color;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use crate::capture::{default_capture, Rect, temp_jpixel_dir, timestamp_filename, cleanup_temp_captures};
+use crate::capture::screen::ScreenCapture;
 
 #[cfg(target_os = "windows")]
 extern "system" {
@@ -94,28 +96,26 @@ fn close_capture_windows_inner(app: &AppHandle) {
     }
 }
 
+/// Per-monitor captured background data, passed from the hotkey handler
+/// to window creation after capture is complete.
+struct MonitorBg {
+    phys_x: i32,
+    phys_y: i32,
+    phys_w: u32,
+    phys_h: u32,
+    scale: f64,
+    bg_path: String,
+}
+
 #[tauri::command]
 pub fn create_capture_window(app: AppHandle) {
-    // Phase 1 — close old capture windows, then release the lock so that
-    // other threads (e.g. frontend IPC) can still close windows
-    {
-        let _lock = capture_op_lock().lock().unwrap();
-        close_capture_windows_inner(&app);
-    }
-
-    // Phase 2 — poll briefly for the async COM close to finish.
-    // We do NOT hold the mutex here so the main thread event loop can
-    // process the close events.  If it times out we create new windows
-    // regardless; unique timestamp labels prevent label collisions.
-    for _ in 0..10 {
-        if !app.webview_windows().keys().any(|k| k.starts_with("capture-")) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    // Phase 3 — create new capture windows under the lock
-    let _lock = capture_op_lock().lock().unwrap();
+    // ── Phase 0 — Capture ALL monitors FIRST ──────────────────
+    // This must happen before any window close/create operation so the
+    // frozen background reflects the exact moment the hotkey fired.
+    // Using `capture_region_no_flush` skips DwmFlush — at this point no
+    // overlay windows exist yet, so there is nothing to flush. Skipping
+    // the flush avoids GPU pipeline stalls that cause video players to
+    // stutter or buffer.
 
     let monitors = match app.available_monitors() {
         Ok(m) => m,
@@ -125,22 +125,96 @@ pub fn create_capture_window(app: AppHandle) {
         }
     };
 
-    for monitor in monitors {
+    let temp_dir = match temp_jpixel_dir(&app) {
+        Ok(d) => d,
+        Err(e) => {
+            log::error!("Failed to get temp dir: {}", e);
+            return;
+        }
+    };
+    cleanup_temp_captures(&temp_dir);
+
+    let mut bg_list: Vec<MonitorBg> = Vec::with_capacity(monitors.len());
+
+    for monitor in &monitors {
         let phys_pos = monitor.position();
         let phys_size = monitor.size();
         let scale = monitor.scale_factor();
 
-        // Convert physical monitor coordinates to logical pixels for window
-        // positioning. Under mixed-DPI multi-monitor, Monitor::position/::size
-        // return physical pixels, but WebviewWindowBuilder::position/::inner_size
-        // expect logical pixels.
-        let logical_x = phys_pos.x as f64 / scale;
-        let logical_y = phys_pos.y as f64 / scale;
-        let logical_w = phys_size.width as f64 / scale;
-        let logical_h = phys_size.height as f64 / scale;
+        let cap_rect = Rect {
+            x: phys_pos.x,
+            y: phys_pos.y,
+            width: phys_size.width,
+            height: phys_size.height,
+        };
 
-        // Use a unique label every time to avoid collisions with lingering
-        // windows that haven't finished asynchronous destruction.
+        // BMP encoding is much faster than PNG (~10×) — no compression,
+        // just a header + raw pixel data.  The file will be loaded by the
+        // WebView via Tauri's asset:// protocol, which serves raw bytes
+        // in-process without any base64 IPC roundtrip.
+        let bg_filename = timestamp_filename("jpixel-cap", "bmp");
+        let bg_path = temp_dir.join(&bg_filename);
+
+        match default_capture().capture_region_no_flush(cap_rect) {
+            Ok(image) => {
+                let image: image::RgbaImage = image;
+                if let Err(e) = image.save(&bg_path) {
+                    log::error!("Failed to save capture bg {}: {}", bg_filename, e);
+                    continue;
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to capture monitor ({},{} {}x{}): {}",
+                    phys_pos.x, phys_pos.y, phys_size.width, phys_size.height, e);
+                continue;
+            }
+        }
+
+        bg_list.push(MonitorBg {
+            phys_x: phys_pos.x,
+            phys_y: phys_pos.y,
+            phys_w: phys_size.width,
+            phys_h: phys_size.height,
+            scale,
+            bg_path: bg_path.to_string_lossy().to_string(),
+        });
+    }
+
+    if bg_list.is_empty() {
+        log::error!("No monitors captured — aborting window creation");
+        return;
+    }
+
+    // ── Phase 1 — Close old capture windows ──────────────────
+    {
+        let _lock = crate::config::lock_or_warn!(capture_op_lock());
+        close_capture_windows_inner(&app);
+    }
+
+    // ── Phase 2 — Poll for async COM close to finish ─────────
+    let mut waited = false;
+    for _ in 0..4 {
+        if !app.webview_windows().keys().any(|k| k.starts_with("capture-")) {
+            break;
+        }
+        waited = true;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if waited && app.webview_windows().keys().any(|k| k.starts_with("capture-")) {
+        log::warn!("Old capture windows did not close within 200 ms — proceeding anyway");
+    }
+
+    // ── Phase 3 — Create windows with pre-captured backgrounds ──
+    let _lock = crate::config::lock_or_warn!(capture_op_lock());
+
+    for bg in &bg_list {
+        let bg_encoded = urlencoding::encode(&bg.bg_path);
+
+        let logical_x = bg.phys_x as f64 / bg.scale;
+        let logical_y = bg.phys_y as f64 / bg.scale;
+        let logical_w = bg.phys_w as f64 / bg.scale;
+        let logical_h = bg.phys_h as f64 / bg.scale;
+
         let label = format!(
             "capture-{}",
             std::time::SystemTime::now()
@@ -149,12 +223,9 @@ pub fn create_capture_window(app: AppHandle) {
                 .as_nanos()
         );
 
-        // Pass physical monitor origin + scale factor so the frontend can
-        // convert CSS-pixel mouse coordinates to absolute physical pixels
-        // for the screenshot backend:  phys = origin + round(css * scale).
         let url = format!(
-            "/#/capture?ox={}&oy={}&scale={}",
-            phys_pos.x, phys_pos.y, scale
+            "/#/capture?ox={}&oy={}&scale={}&bg={}&bw={}&bh={}",
+            bg.phys_x, bg.phys_y, bg.scale, bg_encoded, bg.phys_w, bg.phys_h
         );
 
         match WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
@@ -171,8 +242,6 @@ pub fn create_capture_window(app: AppHandle) {
             .build()
         {
             Ok(w) => {
-                // Explicit set_focus after creation avoids Windows foreground-steal
-                // restrictions when another window (pin) was recently focused.
                 let _ = w.set_focus();
             }
             Err(e) => {
@@ -186,7 +255,7 @@ pub fn create_capture_window(app: AppHandle) {
 pub fn close_capture_windows(app: AppHandle) {
     // Acquire the op-lock so we never race with create_capture_window or
     // other concurrent close_capture_windows calls.
-    let _lock = capture_op_lock().lock().unwrap();
+    let _lock = crate::config::lock_or_warn!(capture_op_lock());
     close_capture_windows_inner(&app);
 }
 
@@ -204,8 +273,17 @@ pub fn spawn_pin_window(
     let b64 = std::fs::read(&image_path)
         .ok()
         .map(|bytes| {
+            let mime = match std::path::Path::new(&image_path)
+                .extension()
+                .and_then(|e| e.to_str())
+            {
+                Some("bmp") => "image/bmp",
+                Some("jpg") | Some("jpeg") => "image/jpeg",
+                _ => "image/png",
+            };
             format!(
-                "data:image/bmp;base64,{}",
+                "data:{};base64,{}",
+                mime,
                 base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
             )
         });
@@ -214,7 +292,7 @@ pub fn spawn_pin_window(
         "pin-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis()
     );
     // Unique event name per pin window so old windows never pick up a

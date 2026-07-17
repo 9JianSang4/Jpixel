@@ -10,15 +10,27 @@ use tauri::AppHandle;
 /// transient `OpenClipboard` failures.  We retry up to 3 times with a 50 ms
 /// back-off to ride out brief contention.
 pub fn with_clipboard<T>(f: impl Fn(&mut Clipboard) -> Result<T, String>) -> Result<T, JpixelError> {
-    static CLIPBOARD: OnceLock<Mutex<Clipboard>> = OnceLock::new();
+    static CLIPBOARD: OnceLock<Mutex<Option<Clipboard>>> = OnceLock::new();
+
+    let mutex = CLIPBOARD.get_or_init(|| Mutex::new(None));
 
     let mut last_err = String::new();
     for attempt in 0..3 {
-        let mutex = CLIPBOARD.get_or_init(|| {
-            Mutex::new(Clipboard::new().expect("Failed to create clipboard"))
-        });
-        let mut cb = mutex.lock().map_err(|e| JpixelError::Clipboard(e.to_string()))?;
-        match f(&mut cb) {
+        let mut guard = mutex.lock().map_err(|e| JpixelError::Clipboard(e.to_string()))?;
+        if guard.is_none() {
+            match Clipboard::new() {
+                Ok(cb) => *guard = Some(cb),
+                Err(e) => {
+                    return Err(JpixelError::Clipboard(format!(
+                        "Failed to initialize clipboard: {}",
+                        e
+                    )));
+                }
+            }
+        }
+        let result = f(guard.as_mut().unwrap());
+        drop(guard);
+        match result {
             Ok(v) => return Ok(v),
             Err(e) => {
                 last_err = e;

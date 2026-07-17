@@ -1,5 +1,8 @@
 <template>
   <div class="capture-layer" :style="{ cursor: cursorStyle }" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @dblclick="onConfirm" @contextmenu.prevent tabindex="0" ref="layerRef">
+    <!-- Frozen background screenshot (captured before overlay appears) -->
+    <img v-if="bgSrc" ref="bgImageRef" :src="bgSrc" @load="onBgLoad" class="bg-frozen" />
+
     <!-- Crosshair cursor lines (segmented to skip 120x120 area around cursor) -->
     <template v-if="!isDragging && !hasSelection">
       <!-- Horizontal left segment -->
@@ -103,13 +106,12 @@
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useRoute } from "vue-router";
 import {
-  copyRegionToClipboard,
-  saveRegionDialog,
-  createPinFromRegion,
+  copyImageToClipboard,
+  saveImageDialog,
+  createPinFromImage,
   closeCaptureWindows,
   copyTextToClipboard,
-  getPixelColor,
-  getMagnifierArea,
+  readImageBase64,
   getCopyHotkey,
   getSaveHotkey,
   getPinHotkey,
@@ -150,6 +152,13 @@ const pixelColor = ref({ r: 0, g: 0, b: 0 });
 const magnifierSrc = ref("");
 const showMagnifier = ref(true);
 
+// Frozen background image state
+const bgSrc = ref("");
+const bgImageRef = ref<HTMLImageElement | null>(null);
+const bgLoaded = ref(false);
+const route = useRoute();
+const bgPath = (route.query.bg as string) || "";
+
 // Annotation (pen / eraser) state
 const drawCanvasRef = ref<HTMLCanvasElement | null>(null);
 const annotationTool = ref<"pen" | "eraser" | null>(null);
@@ -165,7 +174,6 @@ const copyHotkey = ref("Ctrl+C");
 const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
 const defaultAction = ref("save_and_edit");
-const route = useRoute();
 const winOffset = ref({
   x: parseInt((route.query.ox as string) || "0"),
   y: parseInt((route.query.oy as string) || "0"),
@@ -180,11 +188,10 @@ function toPhysical(cssCoord: number, physicalOrigin: number): number {
 }
 
 const HANDLE = 8;
-const THROTTLE = 50;
+const THROTTLE = 33;
 const MIN_SELECTION_SIZE = 2;
 
 let pendingTimeout: number | null = null;
-let isUnmounted = false;
 
 const selLeft = computed(() => Math.min(startX.value, endX.value));
 const selTop = computed(() => Math.min(startY.value, endY.value));
@@ -292,26 +299,49 @@ function zoneToCursor(zone: Zone): string {
   }
 }
 
-let pendingMagnifier = false;
+// Magnifier and color picker — now entirely local, reading from the frozen
+// background image. No IPC needed; updates are synchronous and near-instant.
+function updateMagnifierLocal(cssX: number, cssY: number) {
+  const img = bgImageRef.value;
+  if (!img || !bgLoaded.value) return;
 
-async function updateMagnifierAndColor(x: number, y: number) {
-  if (pendingMagnifier) return;
-  pendingMagnifier = true;
-  try {
-    const color = await getPixelColor(x, y);
-    if (isUnmounted) return;
-    pixelColor.value = { r: color.r, g: color.g, b: color.b };
+  const physX = Math.round(cssX * dpr.value);
+  const physY = Math.round(cssY * dpr.value);
+  const clampedX = Math.max(0, Math.min(physX, img.naturalWidth - 1));
+  const clampedY = Math.max(0, Math.min(physY, img.naturalHeight - 1));
 
-    const src = await getMagnifierArea(x, y, 15);
-    if (isUnmounted) return;
-    magnifierSrc.value = src;
-  } catch (e) {
-    if (!isUnmounted) {
-      console.error("Magnifier error:", e);
-    }
-  } finally {
-    pendingMagnifier = false;
-  }
+  // Read single-pixel color from the frozen image
+  const colorCanvas = document.createElement("canvas");
+  colorCanvas.width = 1;
+  colorCanvas.height = 1;
+  const cctx = colorCanvas.getContext("2d")!;
+  cctx.drawImage(img, clampedX, clampedY, 1, 1, 0, 0, 1, 1);
+  const [r, g, b] = cctx.getImageData(0, 0, 1, 1).data;
+  pixelColor.value = { r, g, b };
+
+  // Build magnified view (15×15 physical pixel area → 100×100 CSS display)
+  const halfSize = 7;
+  const srcX = Math.max(0, clampedX - halfSize);
+  const srcY = Math.max(0, clampedY - halfSize);
+  const srcW = Math.min(15, img.naturalWidth - srcX);
+  const srcH = Math.min(15, img.naturalHeight - srcY);
+
+  const magCanvas = document.createElement("canvas");
+  magCanvas.width = 100;
+  magCanvas.height = 100;
+  const mctx = magCanvas.getContext("2d")!;
+  mctx.imageSmoothingEnabled = false;
+  mctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, 100, 100);
+
+  // Red crosshair at center
+  mctx.strokeStyle = "rgba(255, 0, 0, 0.7)";
+  mctx.lineWidth = 1;
+  mctx.beginPath();
+  mctx.moveTo(50, 0); mctx.lineTo(50, 100);
+  mctx.moveTo(0, 50); mctx.lineTo(100, 50);
+  mctx.stroke();
+
+  magnifierSrc.value = magCanvas.toDataURL();
 }
 
 function onMouseDown(e: MouseEvent) {
@@ -380,10 +410,7 @@ function onMouseMove(e: MouseEvent) {
   if (pendingTimeout === null) {
     pendingTimeout = window.setTimeout(() => {
       pendingTimeout = null;
-      updateMagnifierAndColor(
-        toPhysical(cursorX.value, winOffset.value.x),
-        toPhysical(cursorY.value, winOffset.value.y)
-      );
+      updateMagnifierLocal(cursorX.value, cursorY.value);
     }, THROTTLE);
   }
 }
@@ -470,36 +497,46 @@ function matchHotkey(e: KeyboardEvent, hotkey: string): boolean {
   );
 }
 
-async function hideOverlayForCapture() {
-  // Direct DOM manipulation — synchronous and guaranteed to be
-  // rendered before the next rAF fires. Vue reactivity is too slow
-  // for this use case because WebView2 may capture mid-paint.
-  const root = layerRef.value;
-  if (!root) return;
-  const selectors = ['.toolbar', '.selection-box', '.draw-canvas', '.magnifier', '.eraser-cursor', '.overlay'];
-  const toHide: HTMLElement[] = [];
-  for (const sel of selectors) {
-    const el = root.querySelector(sel) as HTMLElement | null;
-    if (el) toHide.push(el);
+// ── Final image rendering (crop + stroke composite) ──────────
+// Crops the selected region from the frozen background image and
+// composites all annotation strokes onto it, returning a PNG data URL.
+function renderFinalImage(): string {
+  const img = bgImageRef.value;
+  if (!img) return "";
+
+  const physW = Math.round(selWidth.value * dpr.value);
+  const physH = Math.round(selHeight.value * dpr.value);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = physW;
+  canvas.height = physH;
+  const ctx = canvas.getContext("2d")!;
+
+  // Crop from frozen image
+  const srcX = selLeft.value * dpr.value;
+  const srcY = selTop.value * dpr.value;
+  ctx.drawImage(img, srcX, srcY, physW, physH, 0, 0, physW, physH);
+
+  // Composite annotation strokes (already in physical coords
+  // relative to the selection top-left)
+  for (const stroke of strokes.value) {
+    if (stroke.type === "pen") {
+      drawPenStroke(ctx, stroke.points, stroke.color, stroke.width);
+    } else {
+      drawEraserStroke(ctx, stroke.points, stroke.size);
+    }
   }
-  for (const el of toHide) el.style.display = 'none';
-  // Double rAF to ensure the composited frame reaches the screen
-  await new Promise((resolve) =>
-    requestAnimationFrame(() => requestAnimationFrame(resolve))
-  );
+
+  return canvas.toDataURL("image/png");
 }
 
 async function onCopyRegion() {
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
-  await hideOverlayForCapture();
+  const dataUrl = renderFinalImage();
+  if (!dataUrl) return;
   try {
-    await copyRegionToClipboard(
-      toPhysical(selLeft.value, winOffset.value.x),
-      toPhysical(selTop.value, winOffset.value.y),
-      Math.round(selWidth.value * dpr.value),
-      Math.round(selHeight.value * dpr.value),
-      strokes.value.length > 0 ? strokes.value : undefined
-    );
+    await copyImageToClipboard(dataUrl);
+    closeCaptureWindows();
   } catch (e) {
     console.error("Copy failed:", e);
   }
@@ -507,15 +544,10 @@ async function onCopyRegion() {
 
 async function onSaveRegion() {
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
-  await hideOverlayForCapture();
+  const dataUrl = renderFinalImage();
+  if (!dataUrl) return;
   try {
-    await saveRegionDialog(
-      toPhysical(selLeft.value, winOffset.value.x),
-      toPhysical(selTop.value, winOffset.value.y),
-      Math.round(selWidth.value * dpr.value),
-      Math.round(selHeight.value * dpr.value),
-      strokes.value.length > 0 ? strokes.value : undefined
-    );
+    await saveImageDialog(dataUrl);
   } catch (e) {
     console.error("Save failed:", e);
   }
@@ -523,14 +555,15 @@ async function onSaveRegion() {
 
 async function onPinRegion() {
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
-  await hideOverlayForCapture();
+  const dataUrl = renderFinalImage();
+  if (!dataUrl) return;
   try {
-    await createPinFromRegion(
+    await createPinFromImage(
+      dataUrl,
       toPhysical(selLeft.value, winOffset.value.x),
       toPhysical(selTop.value, winOffset.value.y),
       Math.round(selWidth.value * dpr.value),
       Math.round(selHeight.value * dpr.value),
-      strokes.value.length > 0 ? strokes.value : undefined
     );
   } catch (e) {
     console.error("Pin failed:", e);
@@ -686,7 +719,7 @@ function onKeyDown(e: KeyboardEvent) {
   }
   if (e.key.toLowerCase() === "c" && !e.ctrlKey && !e.altKey && !e.metaKey) {
     e.preventDefault();
-    copyTextToClipboard(hexColor.value);
+    copyTextToClipboard(hexColor.value).catch((err) => console.error("Copy color failed:", err));
     return;
   }
   // Pen / eraser shortcuts (only when a selection is active)
@@ -746,6 +779,18 @@ watch(hasSelection, (val) => {
 onMounted(async () => {
   layerRef.value?.focus();
   window.addEventListener("keydown", onKeyDown);
+
+  // Load the frozen background image via IPC (base64 data URL).
+  // The asset:// protocol would be faster but causes cross-origin canvas
+  // tainting in WebView2, which breaks getImageData/toDataURL downstream.
+  if (bgPath) {
+    try {
+      bgSrc.value = await readImageBase64(bgPath);
+    } catch (e) {
+      console.error("Failed to load frozen background:", e);
+    }
+  }
+
   try {
     copyHotkey.value = await getCopyHotkey();
     saveHotkey.value = await getSaveHotkey();
@@ -754,14 +799,15 @@ onMounted(async () => {
   } catch (e) {
     console.error("Failed to load hotkeys:", e);
   }
-  updateMagnifierAndColor(
-    toPhysical(cursorX.value, winOffset.value.x),
-    toPhysical(cursorY.value, winOffset.value.y)
-  );
 });
 
+// Called when the frozen background <img> finishes loading
+function onBgLoad() {
+  bgLoaded.value = true;
+  updateMagnifierLocal(cursorX.value, cursorY.value);
+}
+
 onUnmounted(() => {
-  isUnmounted = true;
   window.removeEventListener("keydown", onKeyDown);
   if (pendingTimeout !== null) {
     clearTimeout(pendingTimeout);
@@ -779,6 +825,18 @@ onUnmounted(() => {
   height: 100vh;
   outline: none;
   overflow: hidden;
+}
+
+.bg-frozen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  z-index: 0;
+  pointer-events: none;
+  image-rendering: auto;
 }
 
 .crosshair-h {

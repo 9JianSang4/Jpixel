@@ -83,6 +83,26 @@ export async function getMagnifierArea(
   return invoke("get_magnifier_area", { x, y, size });
 }
 
+// ─── Image-based commands (frozen-background capture flow) ───
+
+export async function copyImageToClipboard(imageBase64: string): Promise<void> {
+  return invoke("copy_image_to_clipboard", { imageBase64 });
+}
+
+export async function saveImageDialog(imageBase64: string): Promise<void> {
+  return invoke("save_image_dialog", { imageBase64 });
+}
+
+export async function createPinFromImage(
+  imageBase64: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): Promise<string> {
+  return invoke("create_pin_from_image", { imageBase64, x, y, width, height });
+}
+
 // ─────────────────────────────────────────────────────────────
 // Window
 // ─────────────────────────────────────────────────────────────

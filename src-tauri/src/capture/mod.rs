@@ -138,7 +138,7 @@ pub fn composite_strokes(image: &mut image::RgbaImage, strokes_json: &str) -> Re
 // Helpers
 // ─────────────────────────────────────────────────────────────
 
-fn temp_jpixel_dir(app: &AppHandle) -> Result<PathBuf, JpixelError> {
+pub(crate) fn temp_jpixel_dir(app: &AppHandle) -> Result<PathBuf, JpixelError> {
     let temp_dir = app
         .path()
         .temp_dir()
@@ -161,7 +161,7 @@ fn now_timestamp() -> String {
     now.format(&fmt).unwrap_or_else(|_| "unknown".into())
 }
 
-fn timestamp_filename(prefix: &str, ext: &str) -> String {
+pub(crate) fn timestamp_filename(prefix: &str, ext: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -362,6 +362,105 @@ pub fn get_magnifier_area(x: i32, y: i32, size: u32) -> Result<String, JpixelErr
 }
 
 // ─────────────────────────────────────────────────────────────
+// Image-based commands (frozen-background capture flow)
+// ─────────────────────────────────────────────────────────────
+
+/// Decode a base64 data URL (with optional "data:image/...;base64," prefix)
+/// into raw image bytes.
+fn decode_image_base64(data_url: &str) -> Result<Vec<u8>, JpixelError> {
+    let b64 = data_url
+        .strip_prefix("data:image/png;base64,")
+        .or_else(|| data_url.strip_prefix("data:image/bmp;base64,"))
+        .or_else(|| data_url.strip_prefix("data:image/jpeg;base64,"))
+        .unwrap_or(data_url);
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| JpixelError::Image(format!("Base64 decode failed: {}", e)))
+}
+
+/// Copy a frontend-rendered image (PNG base64 data URL) to the clipboard.
+#[tauri::command]
+pub fn copy_image_to_clipboard(image_base64: String) -> Result<(), JpixelError> {
+    let bytes = decode_image_base64(&image_base64)?;
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| JpixelError::Image(format!("Image decode failed: {}", e)))?;
+    let rgba = img.to_rgba8();
+    let img_data = arboard::ImageData {
+        width: rgba.width() as usize,
+        height: rgba.height() as usize,
+        bytes: std::borrow::Cow::Borrowed(rgba.as_raw()),
+    };
+    crate::clipboard::with_clipboard(|cb| {
+        cb.set_image(img_data.clone()).map_err(|e| e.to_string())
+    })?;
+    log::info!("Image copied to clipboard ({}x{})", rgba.width(), rgba.height());
+    Ok(())
+}
+
+/// Save a frontend-rendered image via a file dialog.
+#[tauri::command]
+pub async fn save_image_dialog(
+    app: AppHandle,
+    image_base64: String,
+) -> Result<(), JpixelError> {
+    let bytes = decode_image_base64(&image_base64)?;
+
+    let app_clone = app.clone();
+    let file_path = tauri::async_runtime::spawn_blocking(move || {
+        app_clone
+            .dialog()
+            .file()
+            .add_filter("PNG Image", &["png"])
+            .set_file_name(format!("JpixelFile-{}.png", now_timestamp()))
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| JpixelError::Window(format!("Save dialog: {}", e)))?;
+
+    if let Some(fp) = file_path {
+        let path = fp.as_path().ok_or_else(|| {
+            JpixelError::Window("Invalid file path".to_string())
+        })?;
+        std::fs::write(path, &bytes).map_err(|e| io_err(path, e))?;
+        log::info!("Image saved to {:?}", path);
+    } else {
+        return Err(JpixelError::DialogCancelled);
+    }
+
+    // Close capture windows in background after save
+    let app_close = app.clone();
+    std::thread::spawn(move || {
+        crate::window::close_capture_windows(app_close);
+    });
+
+    Ok(())
+}
+
+/// Create a pin window from a frontend-rendered image.
+#[tauri::command]
+pub fn create_pin_from_image(
+    app: AppHandle,
+    image_base64: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<String, JpixelError> {
+    let bytes = decode_image_base64(&image_base64)?;
+
+    let temp_dir = temp_jpixel_dir(&app)?;
+    let filename = timestamp_filename("jpixel-pin", "png");
+    let path = temp_dir.join(&filename);
+    std::fs::write(&path, &bytes).map_err(|e| io_err(&path, e))?;
+
+    let path_str = path.to_string_lossy().to_string();
+    crate::window::close_capture_windows(app.clone());
+    crate::window::spawn_pin_window(app, path_str.clone(), x, y, width, height);
+
+    Ok(path_str)
+}
+
+// ─────────────────────────────────────────────────────────────
 // Temp file cleanup
 // ─────────────────────────────────────────────────────────────
 
@@ -374,6 +473,25 @@ pub fn cleanup_temp_pins_on_startup(app: &AppHandle) {
         }
     };
     cleanup_temp_pins(&temp_dir);
+}
+
+pub(crate) fn cleanup_temp_captures(temp_dir: &PathBuf) {
+    let entries = match std::fs::read_dir(temp_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("Failed to read temp dir for capture cleanup: {}", e);
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with("jpixel-cap-") && (name_str.ends_with(".png") || name_str.ends_with(".bmp")) {
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                log::warn!("Failed to remove temp capture file: {}", e);
+            }
+        }
+    }
 }
 
 pub fn cleanup_temp_pins(temp_dir: &PathBuf) {

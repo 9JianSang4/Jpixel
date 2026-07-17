@@ -206,6 +206,10 @@ pub fn run() {
             capture::save_region_dialog,
             capture::get_pixel_color,
             capture::get_magnifier_area,
+            // Capture (image-based, frozen-background flow)
+            capture::copy_image_to_clipboard,
+            capture::save_image_dialog,
+            capture::create_pin_from_image,
             // Config
             config::get_double_press_enabled,
             config::set_double_press_enabled,
