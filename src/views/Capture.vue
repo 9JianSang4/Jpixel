@@ -448,8 +448,9 @@ function onMouseUp() {
 }
 
 async function onConfirm() {
+  // No selection → copy full screen (same as Ctrl+C)
   if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) {
-    onCancel();
+    await onCopyRegion();
     return;
   }
   // Dispatch based on configured default action
@@ -498,14 +499,27 @@ function matchHotkey(e: KeyboardEvent, hotkey: string): boolean {
 }
 
 // ── Final image rendering (crop + stroke composite) ──────────
-// Crops the selected region from the frozen background image and
-// composites all annotation strokes onto it, returning a PNG data URL.
-function renderFinalImage(): string {
+// When a selection exists: crops the selected region from the frozen
+// background and composites annotation strokes onto it.
+// When no selection exists (fullScreen=true): renders the entire frozen
+// background image with no annotations.
+function renderFinalImage(fullScreen = false): string {
   const img = bgImageRef.value;
   if (!img) return "";
 
-  const physW = Math.round(selWidth.value * dpr.value);
-  const physH = Math.round(selHeight.value * dpr.value);
+  let srcX: number, srcY: number, physW: number, physH: number;
+
+  if (fullScreen) {
+    srcX = 0;
+    srcY = 0;
+    physW = img.naturalWidth;
+    physH = img.naturalHeight;
+  } else {
+    physW = Math.round(selWidth.value * dpr.value);
+    physH = Math.round(selHeight.value * dpr.value);
+    srcX = selLeft.value * dpr.value;
+    srcY = selTop.value * dpr.value;
+  }
 
   const canvas = document.createElement("canvas");
   canvas.width = physW;
@@ -513,17 +527,16 @@ function renderFinalImage(): string {
   const ctx = canvas.getContext("2d")!;
 
   // Crop from frozen image
-  const srcX = selLeft.value * dpr.value;
-  const srcY = selTop.value * dpr.value;
   ctx.drawImage(img, srcX, srcY, physW, physH, 0, 0, physW, physH);
 
-  // Composite annotation strokes (already in physical coords
-  // relative to the selection top-left)
-  for (const stroke of strokes.value) {
-    if (stroke.type === "pen") {
-      drawPenStroke(ctx, stroke.points, stroke.color, stroke.width);
-    } else {
-      drawEraserStroke(ctx, stroke.points, stroke.size);
+  // Composite annotation strokes (only when a selection exists)
+  if (!fullScreen) {
+    for (const stroke of strokes.value) {
+      if (stroke.type === "pen") {
+        drawPenStroke(ctx, stroke.points, stroke.color, stroke.width);
+      } else {
+        drawEraserStroke(ctx, stroke.points, stroke.size);
+      }
     }
   }
 
@@ -531,8 +544,8 @@ function renderFinalImage(): string {
 }
 
 async function onCopyRegion() {
-  if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
-  const dataUrl = renderFinalImage();
+  const fullScreen = !hasSelection.value || selWidth.value < 2 || selHeight.value < 2;
+  const dataUrl = renderFinalImage(fullScreen);
   if (!dataUrl) return;
   try {
     await copyImageToClipboard(dataUrl);
@@ -543,8 +556,8 @@ async function onCopyRegion() {
 }
 
 async function onSaveRegion() {
-  if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
-  const dataUrl = renderFinalImage();
+  const fullScreen = !hasSelection.value || selWidth.value < 2 || selHeight.value < 2;
+  const dataUrl = renderFinalImage(fullScreen);
   if (!dataUrl) return;
   try {
     await saveImageDialog(dataUrl);
@@ -554,17 +567,16 @@ async function onSaveRegion() {
 }
 
 async function onPinRegion() {
-  if (!hasSelection.value || selWidth.value < 2 || selHeight.value < 2) return;
-  const dataUrl = renderFinalImage();
+  const fullScreen = !hasSelection.value || selWidth.value < 2 || selHeight.value < 2;
+  const dataUrl = renderFinalImage(fullScreen);
   if (!dataUrl) return;
   try {
-    await createPinFromImage(
-      dataUrl,
-      toPhysical(selLeft.value, winOffset.value.x),
-      toPhysical(selTop.value, winOffset.value.y),
-      Math.round(selWidth.value * dpr.value),
-      Math.round(selHeight.value * dpr.value),
-    );
+    // Pin coordinates: use selection bounds or full-window origin
+    const px = fullScreen ? 0 : toPhysical(selLeft.value, winOffset.value.x);
+    const py = fullScreen ? 0 : toPhysical(selTop.value, winOffset.value.y);
+    const pw = Math.round((fullScreen ? window.innerWidth : selWidth.value) * dpr.value);
+    const ph = Math.round((fullScreen ? window.innerHeight : selHeight.value) * dpr.value);
+    await createPinFromImage(dataUrl, px, py, pw, ph);
   } catch (e) {
     console.error("Pin failed:", e);
   }
