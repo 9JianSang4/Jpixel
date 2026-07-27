@@ -526,18 +526,26 @@ function renderFinalImage(fullScreen = false): string {
   canvas.height = physH;
   const ctx = canvas.getContext("2d")!;
 
-  // Crop from frozen image
+  // Draw background onto the final canvas
   ctx.drawImage(img, srcX, srcY, physW, physH, 0, 0, physW, physH);
 
-  // Composite annotation strokes (only when a selection exists)
+  // Composite annotation strokes on a separate layer so that the
+  // eraser (destination-out) only affects strokes, never the background.
   if (!fullScreen) {
+    const strokesCanvas = document.createElement("canvas");
+    strokesCanvas.width = physW;
+    strokesCanvas.height = physH;
+    const sctx = strokesCanvas.getContext("2d")!;
+
     for (const stroke of strokes.value) {
       if (stroke.type === "pen") {
-        drawPenStroke(ctx, stroke.points, stroke.color, stroke.width);
+        drawPenStroke(sctx, stroke.points, stroke.color, stroke.width);
       } else {
-        drawEraserStroke(ctx, stroke.points, stroke.size);
+        drawEraserStroke(sctx, stroke.points, stroke.size);
       }
     }
+
+    ctx.drawImage(strokesCanvas, 0, 0);
   }
 
   return canvas.toDataURL("image/png");
