@@ -11,7 +11,8 @@ use image::RgbaImage;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::time::Instant;
+use std::sync::{mpsc, Mutex};
+use std::time::{Duration, Instant};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
@@ -34,8 +35,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const HOTKEY_ID: i32 = 0x4A50; // "JP"
+const WM_APP_SET_HOTKEY: u32 = 0x8001;
 const CLASS_NAME: PCWSTR = w!("JpixelNativeOverlay");
 static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
+
+struct HotkeyRequest {
+    vk: u32,
+    mods: u32,
+    name: String,
+    reply: mpsc::Sender<Result<(), String>>,
+}
+
+static PENDING_HOTKEY: Mutex<Option<HotkeyRequest>> = Mutex::new(None);
 
 #[derive(Debug, Clone)]
 pub struct CaptureStats {
@@ -240,6 +251,85 @@ pub fn register_hotkey(vk: u32, mods: u32, name: &str) -> Result<()> {
         hwnd.0
     );
     Ok(())
+}
+
+/// Change the native hotkey from the Tauri/settings thread.
+///
+/// RegisterHotKey must run on the thread that owns the overlay window, so the
+/// request is posted to the overlay message loop and the result is returned
+/// through a channel. The old hotkey is restored if the new one is taken.
+pub fn change_hotkey(vk: u32, mods: u32, name: &str) -> Result<()> {
+    let hwnd = with_state(|state| state.hwnd)?;
+    let (reply, result) = mpsc::channel();
+    {
+        let mut pending = PENDING_HOTKEY
+            .lock()
+            .map_err(|_| anyhow!("hotkey request lock poisoned"))?;
+        if pending.is_some() {
+            return Err(anyhow!("another hotkey change is already pending"));
+        }
+        *pending = Some(HotkeyRequest {
+            vk,
+            mods,
+            name: name.to_string(),
+            reply,
+        });
+    }
+
+    unsafe {
+        PostMessageW(hwnd, WM_APP_SET_HOTKEY, WPARAM(0), LPARAM(0))
+            .map_err(|e| anyhow!("cannot post hotkey change: {e}"))?;
+    }
+
+    result
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| anyhow!("hotkey change timed out"))?
+        .map_err(|e| anyhow!(e))
+}
+
+fn handle_pending_hotkey() {
+    let request = PENDING_HOTKEY
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.take());
+    if let Some(request) = request {
+        let result = apply_hotkey_change(request.vk, request.mods, &request.name);
+        let _ = request.reply.send(result);
+    }
+}
+
+fn apply_hotkey_change(vk: u32, mods: u32, name: &str) -> std::result::Result<(), String> {
+    let (hwnd, old_vk, old_mods) =
+        with_state(|state| (state.hwnd, state.hotkey_vk, state.hotkey_mods))
+            .map_err(|e| e.to_string())?;
+    if hwnd.0 == 0 {
+        return Err("native overlay window is not ready".to_string());
+    }
+
+    unsafe {
+        let _ = UnregisterHotKey(hwnd, HOTKEY_ID);
+    }
+    let modifiers = HOT_KEY_MODIFIERS(mods) | MOD_NOREPEAT;
+    match unsafe { RegisterHotKey(hwnd, HOTKEY_ID, modifiers, vk) } {
+        Ok(()) => {
+            let _ = with_state_mut(|state| {
+                state.hotkey_vk = vk;
+                state.hotkey_mods = mods;
+                state.hotkey_name = name.to_string();
+                Ok(())
+            });
+            log::info!("changed native hotkey to {name}");
+            Ok(())
+        }
+        Err(e) => {
+            let old_modifiers = HOT_KEY_MODIFIERS(old_mods) | MOD_NOREPEAT;
+            let restored = unsafe { RegisterHotKey(hwnd, HOTKEY_ID, old_modifiers, old_vk) };
+            if let Err(restore_err) = restored {
+                log::error!("failed to restore previous hotkey: {restore_err}");
+            }
+            Err(format!("RegisterHotKey({name}) failed: {e}"))
+        }
+    }
 }
 
 fn reregister_hotkey() {
@@ -767,6 +857,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             } else if wparam.0 == VK_RETURN.0 as usize {
                 copy_and_close();
             }
+            LRESULT(0)
+        }
+        WM_APP_SET_HOTKEY => {
+            handle_pending_hotkey();
             LRESULT(0)
         }
         WM_HOTKEY => {

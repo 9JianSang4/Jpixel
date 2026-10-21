@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use crate::error::JpixelError;
 use crate::shortcut::parse_shortcut;
 
@@ -19,7 +18,7 @@ use crate::shortcut::parse_shortcut;
 pub struct AppConfig {
     #[serde(default)]
     pub double_press_enabled: bool,
-    #[serde(default = "default_hotkey_f1")]
+    #[serde(default = "default_hotkey_alt_x")]
     pub screenshot_hotkey: String,
     #[serde(default = "default_hotkey_ctrl_c")]
     pub copy_hotkey: String,
@@ -33,7 +32,9 @@ pub struct AppConfig {
     pub default_action: DefaultAction,
 }
 
-fn default_hotkey_f1() -> String { "F1".to_string() }
+fn default_hotkey_alt_x() -> String {
+    "Alt+X".to_string()
+}
 fn default_hotkey_ctrl_c() -> String { "Ctrl+C".to_string() }
 fn default_hotkey_ctrl_s() -> String { "Ctrl+S".to_string() }
 fn default_hotkey_ctrl_t() -> String { "Ctrl+T".to_string() }
@@ -56,7 +57,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             double_press_enabled: false,
-            screenshot_hotkey: "F1".to_string(),
+            screenshot_hotkey: "Alt+X".to_string(),
             copy_hotkey: "Ctrl+C".to_string(),
             save_hotkey: "Ctrl+S".to_string(),
             pin_hotkey: "Ctrl+T".to_string(),
@@ -320,32 +321,17 @@ pub fn set_screenshot_hotkey(
     config: State<ConfigArc>,
     hotkey: String,
 ) -> Result<(), JpixelError> {
-    let new_shortcut = parse_shortcut(&hotkey)
+    // P2.1: the native overlay owns the screenshot hotkey. Change it on the
+    // overlay thread so the legacy WebView capture path is never opened.
+    let parsed = crate::core::hotkey::parse(&hotkey)
         .map_err(|e| JpixelError::InvalidHotkey(format!("'{}': {}", hotkey, e)))?;
+    crate::overlay::change_hotkey(parsed.vk, parsed.mods, &parsed.name)
+        .map_err(|e| JpixelError::InvalidHotkey(e.to_string()))?;
 
     let mut cfg = lock_or_warn!(config);
-    let old_hotkey = cfg.screenshot_hotkey.clone();
     cfg.screenshot_hotkey = hotkey;
     let clone = cfg.clone();
     drop(cfg);
-
-    if let Ok(old) = parse_shortcut(&old_hotkey) {
-        let _ = app.global_shortcut().unregister(old);
-    }
-
-    match app.global_shortcut().register(new_shortcut) {
-        Ok(()) => {}
-        Err(e) => {
-            // Roll back in-memory config so it stays in sync with reality
-            let mut cfg = lock_or_warn!(config);
-            cfg.screenshot_hotkey = old_hotkey.clone();
-            // Re-register the old hotkey (best-effort)
-            if let Ok(old) = parse_shortcut(&old_hotkey) {
-                let _ = app.global_shortcut().register(old);
-            }
-            return Err(JpixelError::InvalidHotkey(format!("Registration failed: {}", e)));
-        }
-    }
 
     save_config(&app, &clone)
 }
@@ -404,7 +390,7 @@ mod tests {
         let cfg = AppConfig::default();
         assert!(!cfg.double_press_enabled);
         assert!(!cfg.auto_launch);
-        assert_eq!(cfg.screenshot_hotkey, "F1");
+        assert_eq!(cfg.screenshot_hotkey, "Alt+X");
         assert_eq!(cfg.copy_hotkey, "Ctrl+C");
         assert_eq!(cfg.save_hotkey, "Ctrl+S");
         assert_eq!(cfg.pin_hotkey, "Ctrl+T");
@@ -436,7 +422,7 @@ mod tests {
 
     #[test]
     fn default_helper_functions() {
-        assert_eq!(default_hotkey_f1(), "F1");
+        assert_eq!(default_hotkey_alt_x(), "Alt+X");
         assert_eq!(default_hotkey_ctrl_c(), "Ctrl+C");
         assert_eq!(default_hotkey_ctrl_s(), "Ctrl+S");
         assert_eq!(default_hotkey_ctrl_t(), "Ctrl+T");

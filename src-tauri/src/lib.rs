@@ -251,12 +251,14 @@ pub fn run() {
             // here or it will steal Alt+X from the overlay thread.
             capture::cleanup_temp_pins_on_startup(app_handle);
 
-            // P2.1 native path: Alt+X is registered by the overlay thread, not
-            // the Tauri global-shortcut plugin. The legacy path remains until
-            // parity is reached in P2.2.
-            let native_config = core::config::NativeConfig::default();
-            if let Err(e) = overlay::start(&native_config.hotkey) {
-                log::error!("Failed to start native overlay: {e}");
+            // P2.1 native path: the saved screenshot hotkey is registered by
+            // the overlay thread, not the Tauri global-shortcut plugin.
+            let native_hotkey = {
+                let cfg = config::lock_or_warn!(config);
+                cfg.screenshot_hotkey.clone()
+            };
+            if let Err(e) = overlay::start(&native_hotkey) {
+                log::error!("Failed to start native overlay with '{native_hotkey}': {e}");
             }
 
             log::info!("Jpixel setup completed successfully");
