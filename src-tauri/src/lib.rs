@@ -2,16 +2,13 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
-pub mod capture;
 mod bubble;
-pub mod clipboard;
-mod config;
+pub mod config;
 pub mod core;
 pub mod error;
 pub mod overlay;
 mod pin;
 mod round_rect;
-mod window;
 
 use config::{load_config, ConfigArc};
 
@@ -132,24 +129,8 @@ pub fn run() {
     let config: ConfigArc = ConfigArc::new(std::sync::Mutex::new(config::AppConfig::default()));
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
         .manage(config.clone())
         .invoke_handler(tauri::generate_handler![
-            // Window
-            window::create_capture_window,
-            window::close_capture_windows,
-            window::create_pin_window,
-            window::close_pin_window,
-            // Capture
-            capture::create_pin_from_region,
-            capture::read_image_base64,
-            capture::save_region_dialog,
-            capture::get_pixel_color,
-            capture::get_magnifier_area,
-            // Capture (image-based, frozen-background flow)
-            capture::copy_image_to_clipboard,
-            capture::save_image_dialog,
-            capture::create_pin_from_image,
             // Config
             config::get_double_press_enabled,
             config::set_double_press_enabled,
@@ -173,9 +154,6 @@ pub fn run() {
             config::set_double_press_speed,
             config::get_default_action,
             config::set_default_action,
-            // Clipboard
-            clipboard::copy_region_to_clipboard,
-            clipboard::copy_text_to_clipboard,
         ])
         .setup(move |app| {
             let app_handle = app.handle();
@@ -191,10 +169,6 @@ pub fn run() {
             }
 
             setup_main_window(app_handle);
-            // P2.1: the native overlay owns the screenshot hotkey. Keep the
-            // legacy registration code for parity work, but do not register it
-            // here or it will steal Alt+X from the overlay thread.
-            capture::cleanup_temp_pins_on_startup(app_handle);
 
             // P2.1 native path: the saved screenshot hotkey is registered by
             // the overlay thread, not the Tauri global-shortcut plugin.
