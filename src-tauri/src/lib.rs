@@ -10,6 +10,7 @@ mod config;
 pub mod core;
 pub mod error;
 pub mod overlay;
+mod pin;
 mod shortcut;
 mod window;
 

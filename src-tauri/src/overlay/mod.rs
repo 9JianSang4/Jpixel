@@ -1,7 +1,7 @@
 //! Native overlay window: capture one monitor, show the frozen frame, let the
 //! user drag a rectangle, copy it, and restore focus.
 
-mod gdi;
+pub(crate) mod gdi;
 
 use self::gdi::Dib;
 use crate::config::SelectionMode;
@@ -418,6 +418,7 @@ pub fn start(hotkey: &str, options: OverlayOptions) -> Result<()> {
 fn run(hotkey: crate::core::hotkey::Hotkey) -> Result<()> {
     enable_per_monitor_v2();
     init()?;
+    crate::pin::register_class()?;
     let monitors = monitor::enumerate()?;
     warm_up(&monitors);
     register_hotkey(hotkey.vk, hotkey.mods, &hotkey.name)?;
@@ -820,7 +821,7 @@ fn toolbar_button_enabled(state: &OverlayState, button: ToolbarButton) -> bool {
         ToolbarButton::Pen => true,
         ToolbarButton::Undo => !state.strokes.is_empty(),
         ToolbarButton::Redo => !state.redo.is_empty(),
-        ToolbarButton::Pin => false,
+        ToolbarButton::Pin => true,
     }
 }
 
@@ -1093,7 +1094,7 @@ fn handle_toolbar_click(button: ToolbarButton) {
         ToolbarButton::Pen => toggle_tool(DrawTool::Pen),
         ToolbarButton::Undo => undo_stroke(),
         ToolbarButton::Redo => redo_stroke(),
-        ToolbarButton::Pin => log::debug!("pin is not implemented until P2.3"),
+        ToolbarButton::Pin => pin_and_close(),
     }
 }
 
@@ -1726,8 +1727,7 @@ fn render_strokes(base: &RgbaImage, strokes: &[Stroke], active: Option<&Stroke>)
     canvas
 }
 
-pub fn copy_current_selection() -> Result<CopyStats> {
-    let (crop, _) = cropped_selection()?;
+fn copy_image_to_clipboard(crop: &RgbaImage) -> Result<CopyStats> {
     let w = crop.width();
     let h = crop.height();
 
@@ -1767,6 +1767,43 @@ pub fn copy_current_selection() -> Result<CopyStats> {
         width: w,
         height: h,
     })
+}
+
+pub fn copy_current_selection() -> Result<CopyStats> {
+    let (crop, _) = cropped_selection()?;
+    copy_image_to_clipboard(&crop)
+}
+
+fn pin_and_close() {
+    let result = (|| -> Result<()> {
+        let (crop, rect) = cropped_selection()?;
+        // Pinning also copies the same flattened image to the clipboard.
+        let stats = copy_image_to_clipboard(&crop)?;
+        let origin = with_state(|state| {
+            let mut window = RECT::default();
+            let _ = unsafe { GetWindowRect(state.hwnd, &mut window) };
+            POINT {
+                x: window.left,
+                y: window.top,
+            }
+        })
+        .unwrap_or(POINT { x: 0, y: 0 });
+        crate::pin::create(
+            crop,
+            origin.x + rect.left + 12,
+            origin.y + rect.top + 12,
+        )?;
+        report_current("pin", Some(&stats));
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => hide_overlay(),
+        Err(e) => {
+            log::error!("pin failed: {e}");
+            show_error(&format!("贴图失败：{e}"));
+        }
+    }
 }
 
 fn report_current(note: &str, copy: Option<&CopyStats>) {
