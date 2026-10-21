@@ -4,26 +4,26 @@
 //! without involving the WebView or a notification service.
 
 use anyhow::{anyhow, Result};
-use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::Instant;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
-    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, GetStockObject, InvalidateRect,
-    RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, CLEARTYPE_QUALITY,
-    DEFAULT_CHARSET, DEFAULT_PITCH, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FW_BOLD,
-    FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
+    GetMonitorInfoW, GetStockObject, InvalidateRect, MonitorFromPoint, RoundRect, SelectObject,
+    SetBkMode, SetTextColor, SetWindowRgn, UpdateWindow, CLEARTYPE_QUALITY, DEFAULT_CHARSET,
+    DEFAULT_PITCH, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FW_BOLD, FW_NORMAL, HDC,
+    HGDIOBJ, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_BRUSH, NULL_PEN,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics,
-    GetWindowLongPtrW, KillTimer, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, CS_HREDRAW, CS_VREDRAW,
+    GetWindowLongPtrW, KillTimer, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
     GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETWORKAREA,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     SW_SHOWNOACTIVATE, WM_DESTROY, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -31,7 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const BUBBLE_CLASS: PCWSTR = w!("JpixelBubble");
 const BUBBLE_WIDTH: i32 = 420;
 const BUBBLE_HEIGHT: i32 = 96;
-const BUBBLE_FADE_MS: u128 = 200;
+const BUBBLE_FADE_MS: u128 = 160;
 const BUBBLE_LIFETIME_MS: u128 = 4500;
 const BUBBLE_ANIM_TIMER_ID: usize = 1;
 const BUBBLE_HIDE_TIMER_ID: usize = 2;
@@ -87,24 +87,27 @@ pub fn show_pin_limit(limit: usize, anchor_x: i32, anchor_top: i32, anchor_botto
         let Ok(module) = GetModuleHandleW(None) else {
             return;
         };
-        let mut work = RECT::default();
-        if SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            Some(&mut work as *mut _ as *mut c_void),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-        .is_err()
-        {
+        let anchor_point = POINT {
+            x: anchor_x,
+            y: anchor_top,
+        };
+        let monitor = MonitorFromPoint(anchor_point, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let work = if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            info.rcWork
+        } else {
             let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
             let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            work = RECT {
+            RECT {
                 left,
                 top,
                 right: left + GetSystemMetrics(SM_CXVIRTUALSCREEN),
                 bottom: top + GetSystemMetrics(SM_CYVIRTUALSCREEN),
-            };
-        }
+            }
+        };
         let fallback_x = work.right - BUBBLE_WIDTH - 12;
         let fallback_y = work.bottom - BUBBLE_HEIGHT - 12;
         let min_x = work.left + 8;
@@ -144,6 +147,8 @@ pub fn show_pin_limit(limit: usize, anchor_x: i32, anchor_top: i32, anchor_botto
         if hwnd.0 == 0 {
             return;
         }
+        let region = CreateRoundRectRgn(0, 0, BUBBLE_WIDTH + 1, BUBBLE_HEIGHT + 1, 18, 18);
+        let _ = SetWindowRgn(hwnd, region, true);
 
         let title_font = CreateFontW(
             -16,
@@ -240,7 +245,7 @@ unsafe extern "system" fn bubble_wndproc(
                     }
                     let progress = (elapsed as f32 / BUBBLE_FADE_MS as f32).min(1.0);
                     let eased = 1.0 - (1.0 - progress).powi(3);
-                    let y = state.target_y + ((1.0 - eased) * 14.0) as i32;
+                    let y = state.target_y + ((1.0 - eased) * 8.0) as i32;
                     let alpha = (235.0 * eased) as u8;
                     if progress >= 1.0 {
                         // Stop the animation timer so the text is not repainted
@@ -293,10 +298,26 @@ unsafe fn paint_bubble(hwnd: HWND, hdc: HDC, state: &BubbleState) {
     let background = CreateSolidBrush(rgb(32, 32, 36));
     let old_brush = SelectObject(hdc, HGDIOBJ(background.0));
     let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-    let _ = RoundRect(hdc, 0, 0, client.right, client.bottom, 12, 12);
+    let _ = RoundRect(hdc, 0, 0, client.right, client.bottom, 14, 14);
     SelectObject(hdc, old_pen);
     SelectObject(hdc, old_brush);
     let _ = DeleteObject(HGDIOBJ(background.0));
+
+    let border = CreatePen(PS_SOLID, 1, rgb(255, 255, 255));
+    let old_pen = SelectObject(hdc, HGDIOBJ(border.0));
+    let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    let _ = RoundRect(
+        hdc,
+        1,
+        1,
+        client.right - 1,
+        client.bottom - 1,
+        12,
+        12,
+    );
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    let _ = DeleteObject(HGDIOBJ(border.0));
 
     let _ = SetBkMode(hdc, TRANSPARENT);
 
