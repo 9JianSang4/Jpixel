@@ -1,6 +1,6 @@
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 mod bubble;
 pub mod config;
@@ -76,12 +76,7 @@ fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
         .menu(&menu)
         .on_menu_event(|app: &AppHandle, event| {
             match event.id.as_ref() {
-                "settings" => {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                }
+                "settings" => show_settings_window(app),
                 "quit" => app.exit(0),
                 _ => {}
             }
@@ -101,16 +96,33 @@ fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
     Ok(())
 }
 
-fn setup_main_window(app: &AppHandle) {
+fn show_settings_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let win_hide = window.clone();
-        window.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = win_hide.hide();
-            }
-        });
-        let _ = window.hide();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+
+    match WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("Jpixel")
+        .inner_size(800.0, 600.0)
+        .resizable(false)
+        .maximizable(false)
+        .center()
+        .build()
+    {
+        Ok(window) => {
+            let win_hide = window.clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = win_hide.hide();
+                }
+            });
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        Err(e) => log::error!("failed to create settings window: {e}"),
     }
 }
 
@@ -167,8 +179,6 @@ pub fn run() {
             if let Err(e) = setup_tray(app_handle) {
                 log::error!("Failed to setup tray: {}", e);
             }
-
-            setup_main_window(app_handle);
 
             // P2.1 native path: the saved screenshot hotkey is registered by
             // the overlay thread, not the Tauri global-shortcut plugin.
