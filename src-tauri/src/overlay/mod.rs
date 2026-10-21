@@ -1873,9 +1873,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 gdi::invalidate(hwnd);
                 return LRESULT(0);
             }
-            if begin_stroke(hwnd, pt) {
-                return LRESULT(0);
-            }
             let options = current_options();
             if options.selection_mode == SelectionMode::Resize {
                 let selection = with_state(selection_rect).ok().flatten();
@@ -1896,6 +1893,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         .ok();
                         return LRESULT(0);
                     }
+                    if begin_stroke(hwnd, pt) {
+                        return LRESULT(0);
+                    }
                     if pt.x >= selection.left
                         && pt.x < selection.right
                         && pt.y >= selection.top
@@ -1914,6 +1914,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         return LRESULT(0);
                     }
                 }
+            } else if begin_stroke(hwnd, pt) {
+                return LRESULT(0);
             }
             let _ = SetCapture(hwnd);
             clip_cursor_to_window(hwnd);
