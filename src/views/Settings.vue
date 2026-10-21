@@ -94,22 +94,12 @@
             <div class="setting-label">默认操作</div>
             <p class="setting-desc">双击或按 Enter 时执行的操作。</p>
           </div>
-          <div class="select-wrap">
-            <select
-              v-model="defaultAction"
-              class="select-input"
-              aria-label="默认操作"
-              @change="onDefaultActionChange"
-            >
-              <option value="save_and_edit">{{ actionLabels.save_and_edit }}</option>
-              <option value="copy">{{ actionLabels.copy }}</option>
-              <option value="save">{{ actionLabels.save }}</option>
-              <option value="pin">{{ actionLabels.pin }}</option>
-            </select>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m7 10 5 5 5-5" />
-            </svg>
-          </div>
+          <SettingsSelect
+            v-model="defaultAction"
+            :options="defaultActionOptions"
+            aria-label="默认操作"
+            @change="onDefaultActionChange"
+          />
         </div>
 
         <div class="setting-row">
@@ -133,20 +123,12 @@
             <div class="setting-label">选后操作</div>
             <p class="setting-desc">拖动重选保持十字准星；调整大小显示控制点。</p>
           </div>
-          <div class="select-wrap">
-            <select
-              v-model="selectionMode"
-              class="select-input"
-              aria-label="选后操作"
-              @change="onSelectionModeChange"
-            >
-              <option value="reselect">拖动重选</option>
-              <option value="resize">调整大小</option>
-            </select>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m7 10 5 5 5-5" />
-            </svg>
-          </div>
+          <SettingsSelect
+            v-model="selectionMode"
+            :options="selectionModeOptions"
+            aria-label="选后操作"
+            @change="onSelectionModeChange"
+          />
         </div>
       </section>
 
@@ -319,6 +301,7 @@ import {
   type SelectionMode,
 } from "../api/ipc";
 import { formatHotkey } from "../utils/hotkey";
+import SettingsSelect from "../components/SettingsSelect.vue";
 
 const version = "1.2.0";
 const activeSection = ref("general");
@@ -330,7 +313,7 @@ const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
 const defaultAction = ref("save_and_edit");
 const crosshairGuides = ref(true);
-const selectionMode = ref<SelectionMode>("reselect");
+const selectionMode = ref("reselect");
 const recordingMode = ref<string | null>(null);
 const hotkeyError = ref<string | null>(null);
 
@@ -340,6 +323,16 @@ const actionLabels: Record<string, string> = {
   save: "保存文件",
   pin: "贴图",
 };
+
+const defaultActionOptions = Object.entries(actionLabels).map(([value, label]) => ({
+  value,
+  label,
+}));
+
+const selectionModeOptions = [
+  { value: "reselect", label: "拖动重选" },
+  { value: "resize", label: "调整大小" },
+];
 
 function hotkeyKeys(value: string): string[] {
   return value
@@ -389,7 +382,7 @@ function onCrosshairChange() {
 }
 
 function onSelectionModeChange() {
-  setSelectionMode(selectionMode.value).catch((err: unknown) => {
+  setSelectionMode(selectionMode.value as SelectionMode).catch((err: unknown) => {
     console.error("Failed to set selection mode:", err);
   });
 }
@@ -464,6 +457,7 @@ function onKeyDown(e: KeyboardEvent, mode: string) {
   --danger-bg: #fdecea;
   --danger: #a12622;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --row-hover: rgba(47, 111, 237, 0.035);
 
   display: flex;
   width: 100vw;
@@ -494,6 +488,7 @@ function onKeyDown(e: KeyboardEvent, mode: string) {
     --danger-bg: #3b2323;
     --danger: #ffb4ab;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+    --row-hover: rgba(76, 194, 255, 0.055);
   }
 }
 
@@ -566,7 +561,11 @@ function onKeyDown(e: KeyboardEvent, mode: string) {
   font-size: 13.5px;
   text-align: left;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.16s ease, color 0.16s ease, transform 0.12s ease;
+}
+
+.nav-item:active {
+  transform: scale(0.985);
 }
 
 .nav-item svg {
@@ -610,6 +609,7 @@ function onKeyDown(e: KeyboardEvent, mode: string) {
 .page-header {
   max-width: 720px;
   margin-bottom: 22px;
+  animation: fade-up 0.26s ease both;
 }
 
 .page-header h1 {
@@ -629,11 +629,18 @@ function onKeyDown(e: KeyboardEvent, mode: string) {
 .settings-card {
   max-width: 720px;
   margin-bottom: 18px;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--card);
   box-shadow: var(--shadow);
+  animation: card-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.settings-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.055);
 }
 
 .card-header {
@@ -659,6 +666,11 @@ function onKeyDown(e: KeyboardEvent, mode: string) {
   justify-content: space-between;
   gap: 28px;
   padding: 18px 20px;
+  transition: background 0.15s ease;
+}
+
+.setting-row:hover {
+  background: var(--row-hover);
 }
 
 .setting-row + .setting-row {
@@ -698,7 +710,12 @@ function onKeyDown(e: KeyboardEvent, mode: string) {
   color: var(--text);
   cursor: pointer;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease,
+    transform 0.12s ease;
+}
+
+.hotkey-input:active {
+  transform: scale(0.99);
 }
 
 .hotkey-input:hover {
@@ -744,49 +761,6 @@ kbd {
   white-space: nowrap;
 }
 
-.select-wrap {
-  position: relative;
-  flex: 0 0 auto;
-}
-
-.select-wrap svg {
-  position: absolute;
-  top: 50%;
-  right: 10px;
-  width: 16px;
-  height: 16px;
-  transform: translateY(-50%);
-  fill: none;
-  stroke: var(--muted);
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.7;
-  pointer-events: none;
-}
-
-.select-input {
-  min-width: 160px;
-  padding: 8px 32px 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  appearance: none;
-  background: var(--bg);
-  color: var(--text);
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-  outline: none;
-}
-
-.select-input:hover {
-  border-color: var(--accent);
-}
-
-.select-input:focus-visible {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-
 .error-banner {
   max-width: 720px;
   margin-bottom: 16px;
@@ -819,7 +793,7 @@ kbd {
   border-radius: 24px;
   background: #c8c8c8;
   cursor: pointer;
-  transition: background 0.18s ease;
+  transition: background 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.18s ease;
 }
 
 .slider::before {
@@ -832,7 +806,7 @@ kbd {
   background: #ffffff;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
   content: "";
-  transition: transform 0.18s ease;
+  transition: transform 0.22s cubic-bezier(0.2, 0.9, 0.25, 1);
 }
 
 .switch input:focus-visible + .slider {
@@ -858,6 +832,44 @@ kbd {
   border-top: 1px solid var(--border);
   color: var(--muted);
   font-size: 11.5px;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(7px) scale(0.996);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-header,
+  .settings-card {
+    animation: none;
+  }
+
+  .nav-item,
+  .hotkey-input,
+  .slider,
+  .slider::before,
+  .setting-row,
+  .settings-card {
+    transition: none;
+  }
 }
 
 @media (max-width: 720px) {
