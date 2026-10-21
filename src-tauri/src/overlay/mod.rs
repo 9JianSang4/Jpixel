@@ -22,11 +22,9 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    AlphaBlend, BeginPaint, CreateFontW, CreatePen,
-    CreateRoundRectRgn, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, EndPaint,
-    FillRect, GetStockObject, RestoreDC, RoundRect, SaveDC, ScreenToClient, SelectClipRgn,
-    SelectObject, SetBkMode, SetTextColor, SetViewportOrgEx, UpdateWindow, AC_SRC_ALPHA,
-    AC_SRC_OVER, BLENDFUNCTION,
+    BeginPaint, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteObject,
+    DrawTextW, Ellipse, EndPaint, FillRect, GetStockObject, RestoreDC, RoundRect, SaveDC,
+    ScreenToClient, SelectClipRgn, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER,
     DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_BRUSH, NULL_PEN,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
@@ -857,6 +855,60 @@ fn toolbar_motion_point(motion: &ToolbarMotion, now: Instant) -> POINT {
     }
 }
 
+fn rects_intersect(a: RECT, b: RECT) -> bool {
+    a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+}
+
+fn toolbar_outside_selection(selection: RECT, screen_w: i32, screen_h: i32, current: RECT) -> RECT {
+    let margin = TOOLBAR_OFFSET;
+    let min_x = 4;
+    let max_x = (screen_w - TOOLBAR_W - 4).max(4);
+    let min_y = 4;
+    let max_y = (screen_h - TOOLBAR_H - 4).max(4);
+    let aligned_left = (selection.right - TOOLBAR_W).clamp(min_x, max_x);
+    let aligned_top = selection.top.clamp(min_y, max_y);
+    let candidates = [
+        RECT {
+            left: aligned_left,
+            top: selection.bottom + margin,
+            right: aligned_left + TOOLBAR_W,
+            bottom: selection.bottom + margin + TOOLBAR_H,
+        },
+        RECT {
+            left: aligned_left,
+            top: selection.top - TOOLBAR_H - margin,
+            right: aligned_left + TOOLBAR_W,
+            bottom: selection.top - margin,
+        },
+        RECT {
+            left: selection.right + margin,
+            top: aligned_top,
+            right: selection.right + margin + TOOLBAR_W,
+            bottom: aligned_top + TOOLBAR_H,
+        },
+        RECT {
+            left: selection.left - TOOLBAR_W - margin,
+            top: aligned_top,
+            right: selection.left - margin,
+            bottom: aligned_top + TOOLBAR_H,
+        },
+    ];
+
+    candidates
+        .into_iter()
+        .filter(|rect| {
+            rect.left >= min_x
+                && rect.top >= min_y
+                && rect.right <= screen_w - 4
+                && rect.bottom <= screen_h - 4
+                && !rects_intersect(*rect, selection)
+        })
+        .min_by_key(|rect| {
+            (rect.left - current.left).abs() + (rect.top - current.top).abs()
+        })
+        .unwrap_or(current)
+}
+
 fn toolbar_rect(state: &OverlayState) -> Option<RECT> {
     if state.dragging {
         return state.toolbar_freeze;
@@ -1092,47 +1144,6 @@ fn draw_pen_color_preview(hdc: HDC, _back: &Dib, state: &OverlayState) {
             Some((0xFFFFFFFF, 1.0)),
         );
     }
-}
-
-fn draw_toolbar_faded(hdc: HDC, back: &Dib, state: &OverlayState) -> Result<()> {
-    let Some(rect) = toolbar_rect(state) else {
-        return Ok(());
-    };
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
-    unsafe {
-        // A real 32-bit DIB is more reliable for AlphaBlend than a compatible
-        // DDB, which can be created without a usable alpha layout.
-        let mut source = Dib::blank(width, height)?;
-        let _ = SetViewportOrgEx(source.hdc(), -rect.left, -rect.top, None);
-        draw_toolbar(source.hdc(), back, state)?;
-        source.make_opaque();
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 110,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        let blended = AlphaBlend(
-            hdc,
-            rect.left,
-            rect.top,
-            width,
-            height,
-            source.hdc(),
-            0,
-            0,
-            width,
-            height,
-            blend,
-        );
-        if !blended.as_bool() {
-            // Never make the old toolbar disappear just because blending
-            // failed: fall back to drawing it normally while reselecting.
-            draw_toolbar(hdc, back, state)?;
-        }
-    }
-    Ok(())
 }
 
 fn draw_toolbar(hdc: HDC, back: &Dib, state: &OverlayState) -> Result<()> {
@@ -2353,11 +2364,7 @@ fn paint(hwnd: HWND) {
                         draw_crosshair(back, state)?;
                         draw_handles(hdc, state)?;
                         draw_eraser_cursor(hdc, state)?;
-                        if state.toolbar_freeze.is_some() {
-                            draw_toolbar_faded(hdc, back, state)?;
-                        } else {
-                            draw_toolbar(hdc, back, state)?;
-                        }
+                        draw_toolbar(hdc, back, state)?;
                         Ok(())
                     })
                 {
@@ -2660,6 +2667,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 if state.dragging {
                     state.end = Some(clamp_to_image(state, pt));
+                    if let (Some(freeze), Some(selection), Some(image)) = (
+                        state.toolbar_freeze,
+                        selection_rect(state),
+                        state.image.as_ref(),
+                    ) {
+                        if rects_intersect(freeze, selection) {
+                            state.toolbar_freeze = Some(toolbar_outside_selection(
+                                selection,
+                                image.width() as i32,
+                                image.height() as i32,
+                                freeze,
+                            ));
+                        }
+                    }
                     return Ok(());
                 }
                 let previous = state.hover_button;

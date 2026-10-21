@@ -173,16 +173,6 @@ impl Dib {
         self.hdc
     }
 
-    /// Mark every pixel fully opaque. GDI drawing leaves the alpha byte at zero
-    /// on a blank DIB, which makes AlphaBlend show nothing.
-    pub fn make_opaque(&mut self) {
-        let len = (self.width as usize) * (self.height as usize) * 4;
-        let bits = unsafe { std::slice::from_raw_parts_mut(self.bits, len) };
-        for pixel in bits.chunks_exact_mut(4) {
-            pixel[3] = 255;
-        }
-    }
-
     /// Blend a horizontal 1px line into this BGRA DIB. Used for the soft
     /// crosshair guides; GDI pens cannot express per-pixel alpha here.
     pub fn blend_hline(&self, y: i32, x0: i32, x1: i32, color: (u8, u8, u8), alpha: u8) {
