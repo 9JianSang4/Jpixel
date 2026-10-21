@@ -880,14 +880,6 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
     };
     let (r, g, b) = pen_rgb(state);
     unsafe {
-        let backdrop = CreateSolidBrush(rgb(28, 28, 30));
-        let old_brush = SelectObject(hdc, HGDIOBJ(backdrop.0));
-        let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-        let _ = RoundRect(hdc, left - 3, top - 3, left + size + 3, top + size + 3, 8, 8);
-        SelectObject(hdc, old_pen);
-        SelectObject(hdc, old_brush);
-        let _ = DeleteObject(HGDIOBJ(backdrop.0));
-
         // Checkerboard so low-opacity colors (especially white) are visible.
         let light = CreateSolidBrush(rgb(236, 236, 238));
         let dark = CreateSolidBrush(rgb(118, 118, 124));
@@ -935,20 +927,21 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
         let _ = FillRect(hdc, &fill, fill_brush);
         let _ = DeleteObject(HGDIOBJ(fill_brush.0));
 
-        // Frame last: explicit 1px pieces keep all four edges identical.
+        // Symmetric 4px dark outer frame, then a 1px white inner frame.
+        let outer = RECT {
+            left: left - 4,
+            top: top - 4,
+            right: left + size + 4,
+            bottom: top + size + 4,
+        };
+        fill_frame(hdc, outer, 4, rgb(28, 28, 30));
+
         let frame = RECT {
             left,
             top,
             right: left + size,
             bottom: top + size,
         };
-        let outer = RECT {
-            left: left - 1,
-            top: top - 1,
-            right: left + size + 1,
-            bottom: top + size + 1,
-        };
-        fill_frame(hdc, outer, 1, rgb(18, 18, 20));
         fill_frame(hdc, frame, 1, rgb(255, 255, 255));
     }
 }
