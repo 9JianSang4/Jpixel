@@ -20,6 +20,12 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+# The shipping app currently optimizes release for size. The spike needs a
+# speed-first profile so its latency numbers reflect the actual hot path.
+[profile.spike]
+inherits = "release"
+opt-level = 3
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
@@ -47,13 +53,20 @@ urlencoding = "2"
 time = { version = "0.3", features = ["formatting", "local-offset"] }
 log = "0.4"
 env_logger = "0.11"
+anyhow = "1"
 single-instance = "0.3"
 thiserror = "1"
 raw-window-handle = "0.6"
 windows = { version = "0.52", features = [
     "Win32_Foundation",
-    "Win32_System_Registry",
-    "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 

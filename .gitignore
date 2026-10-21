@@ -29,3 +29,10 @@ src-tauri/temp/
 
 # Experimental
 native/
+
+# Stage 1 spike artifacts
+spike/dev-run/
+spike/run/spike.exe
+spike/run/spike-log.csv
+/spike-log.csv
+/test-pattern-*.png
