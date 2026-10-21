@@ -1558,10 +1558,13 @@ fn render_eraser_points(
         erase_brush(canvas, base, points[0].x, points[0].y, radius);
         return;
     }
+    // Large brushes overlap heavily, so stamping every pixel is wasted work and
+    // makes fast drags quadratic. Space stamps by half the radius instead.
+    let stamp_step = (radius / 2).max(1);
     for pair in points.windows(2) {
         let dx = pair[1].x - pair[0].x;
         let dy = pair[1].y - pair[0].y;
-        let steps = dx.abs().max(dy.abs()).max(1);
+        let steps = (dx.abs().max(dy.abs()).max(1) / stamp_step).max(1);
         for index in 0..=steps {
             let t = index as f32 / steps as f32;
             let cx = pair[0].x + (dx as f32 * t).round() as i32;
