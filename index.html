@@ -5,10 +5,101 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Jpixel</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+
+      html,
+      body,
+      #app {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        background: #f3f3f3;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #1c1c1e;
+        }
+      }
+
+      .boot-loader {
+        display: flex;
+        height: 100%;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        color: #6b6b70;
+        font-family:
+          "Segoe UI",
+          "Microsoft YaHei UI",
+          sans-serif;
+        font-size: 12.5px;
+        opacity: 0;
+        animation: boot-fade-in 180ms ease-out forwards;
+      }
+
+      .boot-mark {
+        display: flex;
+        width: 38px;
+        height: 38px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 11px;
+        background: #2f6fed;
+        color: #fff;
+        font-size: 19px;
+        font-weight: 600;
+        box-shadow: 0 8px 22px rgba(47, 111, 237, 0.25);
+      }
+
+      .boot-spinner {
+        width: 15px;
+        height: 15px;
+        border: 2px solid rgba(128, 128, 136, 0.24);
+        border-top-color: #2f6fed;
+        border-radius: 50%;
+        animation: boot-spin 700ms linear infinite;
+      }
+
+      @keyframes boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @keyframes boot-fade-in {
+        to {
+          opacity: 1;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .boot-loader {
+          animation: none;
+          opacity: 1;
+        }
+
+        .boot-spinner {
+          animation: none;
+        }
+      }
+    </style>
   </head>
 
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div class="boot-loader">
+        <div class="boot-mark">J</div>
+        <div class="boot-spinner"></div>
+        <span>正在打开 Jpixel…</span>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
