@@ -119,6 +119,24 @@ impl Default for AppConfig {
     }
 }
 
+fn overlay_binding(value: &str, fallback: crate::overlay::KeyBinding) -> crate::overlay::KeyBinding {
+    crate::core::hotkey::parse(value)
+        .map(|hotkey| crate::overlay::KeyBinding::new(hotkey.vk, hotkey.mods))
+        .unwrap_or(fallback)
+}
+
+/// Build the complete native-overlay option set from persisted settings.
+pub fn native_overlay_options(config: &AppConfig) -> crate::overlay::OverlayOptions {
+    crate::overlay::OverlayOptions {
+        crosshair_guides: config.crosshair_guides,
+        selection_mode: config.selection_mode,
+        double_press_enabled: config.double_press_enabled,
+        double_press_window_ms: config.double_press_speed.window_ms(),
+        copy_hotkey: overlay_binding(&config.copy_hotkey, crate::overlay::DEFAULT_COPY_HOTKEY),
+        save_hotkey: overlay_binding(&config.save_hotkey, crate::overlay::DEFAULT_SAVE_HOTKEY),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Runtime state (not serialized)
 // ─────────────────────────────────────────────────────────────
@@ -253,12 +271,7 @@ pub fn set_double_press_enabled(
     cfg.double_press_enabled = value;
     let clone = cfg.clone();
     drop(cfg);
-    crate::overlay::set_options(
-        clone.crosshair_guides,
-        clone.selection_mode,
-        clone.double_press_enabled,
-        clone.double_press_speed.window_ms(),
-    );
+    crate::overlay::set_options(native_overlay_options(&clone));
     save_config(&app, &clone)
 }
 
@@ -285,12 +298,7 @@ pub fn set_double_press_speed(
     cfg.double_press_speed = value;
     let clone = cfg.clone();
     drop(cfg);
-    crate::overlay::set_options(
-        clone.crosshair_guides,
-        clone.selection_mode,
-        clone.double_press_enabled,
-        clone.double_press_speed.window_ms(),
-    );
+    crate::overlay::set_options(native_overlay_options(&clone));
     save_config(&app, &clone)
 }
 
@@ -304,12 +312,7 @@ pub fn set_crosshair_guides(
     cfg.crosshair_guides = value;
     let clone = cfg.clone();
     drop(cfg);
-    crate::overlay::set_options(
-        clone.crosshair_guides,
-        clone.selection_mode,
-        clone.double_press_enabled,
-        clone.double_press_speed.window_ms(),
-    );
+    crate::overlay::set_options(native_overlay_options(&clone));
     save_config(&app, &clone)
 }
 
@@ -323,12 +326,7 @@ pub fn set_selection_mode(
     cfg.selection_mode = value;
     let clone = cfg.clone();
     drop(cfg);
-    crate::overlay::set_options(
-        clone.crosshair_guides,
-        clone.selection_mode,
-        clone.double_press_enabled,
-        clone.double_press_speed.window_ms(),
-    );
+    crate::overlay::set_options(native_overlay_options(&clone));
     save_config(&app, &clone)
 }
 
@@ -475,12 +473,13 @@ pub fn set_copy_hotkey(
     config: State<ConfigArc>,
     hotkey: String,
 ) -> Result<(), JpixelError> {
-    let _ = parse_shortcut(&hotkey)
+    crate::core::hotkey::parse(&hotkey)
         .map_err(|e| JpixelError::InvalidHotkey(format!("'{}': {}", hotkey, e)))?;
     let mut cfg = lock_or_warn!(config);
     cfg.copy_hotkey = hotkey;
     let clone = cfg.clone();
     drop(cfg);
+    crate::overlay::set_options(native_overlay_options(&clone));
     save_config(&app, &clone)
 }
 
@@ -490,12 +489,13 @@ pub fn set_save_hotkey(
     config: State<ConfigArc>,
     hotkey: String,
 ) -> Result<(), JpixelError> {
-    let _ = parse_shortcut(&hotkey)
+    crate::core::hotkey::parse(&hotkey)
         .map_err(|e| JpixelError::InvalidHotkey(format!("'{}': {}", hotkey, e)))?;
     let mut cfg = lock_or_warn!(config);
     cfg.save_hotkey = hotkey;
     let clone = cfg.clone();
     drop(cfg);
+    crate::overlay::set_options(native_overlay_options(&clone));
     save_config(&app, &clone)
 }
 

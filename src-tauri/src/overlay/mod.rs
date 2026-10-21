@@ -5,6 +5,7 @@ mod gdi;
 
 use self::gdi::Dib;
 use crate::config::SelectionMode;
+use crate::core::hotkey::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::core::monitor::{self, MonitorInfo};
 use anyhow::{anyhow, Result};
 use arboard::{Clipboard, ImageData};
@@ -33,8 +34,8 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, RegisterHotKey, ReleaseCapture, SetActiveWindow, SetCapture, SetFocus,
-    UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT, VK_C, VK_CONTROL, VK_ESCAPE, VK_RETURN,
-    VK_S,
+    UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU,
+    VK_RETURN, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, ClipCursor, CreateWindowExW, DefWindowProcW, DispatchMessageW,
@@ -53,12 +54,33 @@ const WM_APP_SET_OPTIONS: u32 = 0x8002;
 const CLASS_NAME: PCWSTR = w!("JpixelNativeOverlay");
 static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyBinding {
+    pub vk: u32,
+    pub mods: u32,
+}
+
+impl KeyBinding {
+    pub const fn new(vk: u32, mods: u32) -> Self {
+        Self { vk, mods }
+    }
+
+    fn matches(self, vk: u32, mods: u32) -> bool {
+        self.vk == vk && self.mods == mods
+    }
+}
+
+pub const DEFAULT_COPY_HOTKEY: KeyBinding = KeyBinding::new(0x43, MOD_CONTROL); // Ctrl+C
+pub const DEFAULT_SAVE_HOTKEY: KeyBinding = KeyBinding::new(0x53, MOD_CONTROL); // Ctrl+S
+
 #[derive(Debug, Clone, Copy)]
 pub struct OverlayOptions {
     pub crosshair_guides: bool,
     pub selection_mode: SelectionMode,
     pub double_press_enabled: bool,
     pub double_press_window_ms: u64,
+    pub copy_hotkey: KeyBinding,
+    pub save_hotkey: KeyBinding,
 }
 
 impl Default for OverlayOptions {
@@ -68,6 +90,8 @@ impl Default for OverlayOptions {
             selection_mode: SelectionMode::Reselect,
             double_press_enabled: false,
             double_press_window_ms: 500,
+            copy_hotkey: DEFAULT_COPY_HOTKEY,
+            save_hotkey: DEFAULT_SAVE_HOTKEY,
         }
     }
 }
@@ -77,6 +101,8 @@ static OPTIONS: Mutex<OverlayOptions> = Mutex::new(OverlayOptions {
     selection_mode: SelectionMode::Reselect,
     double_press_enabled: false,
     double_press_window_ms: 500,
+    copy_hotkey: DEFAULT_COPY_HOTKEY,
+    save_hotkey: DEFAULT_SAVE_HOTKEY,
 });
 
 fn current_options() -> OverlayOptions {
@@ -302,19 +328,9 @@ pub fn init() -> Result<()> {
 }
 
 /// Update live overlay options from the settings thread.
-pub fn set_options(
-    crosshair_guides: bool,
-    selection_mode: SelectionMode,
-    double_press_enabled: bool,
-    double_press_window_ms: u64,
-) {
-    if let Ok(mut options) = OPTIONS.lock() {
-        *options = OverlayOptions {
-            crosshair_guides,
-            selection_mode,
-            double_press_enabled,
-            double_press_window_ms,
-        };
+pub fn set_options(options: OverlayOptions) {
+    if let Ok(mut current) = OPTIONS.lock() {
+        *current = options;
     }
     let raw = OVERLAY_HWND.load(Ordering::SeqCst);
     if raw != 0 {
@@ -1405,6 +1421,25 @@ fn cancel_and_close() {
     hide_overlay();
 }
 
+fn active_modifiers() -> u32 {
+    let mut mods = 0;
+    unsafe {
+        if GetKeyState(VK_CONTROL.0 as i32) < 0 {
+            mods |= MOD_CONTROL;
+        }
+        if GetKeyState(VK_MENU.0 as i32) < 0 {
+            mods |= MOD_ALT;
+        }
+        if GetKeyState(VK_SHIFT.0 as i32) < 0 {
+            mods |= MOD_SHIFT;
+        }
+        if GetKeyState(VK_LWIN.0 as i32) < 0 || GetKeyState(VK_RWIN.0 as i32) < 0 {
+            mods |= MOD_WIN;
+        }
+    }
+    mods
+}
+
 fn handle_hotkey() {
     let recapture = is_visible();
     if !recapture && current_options().double_press_enabled {
@@ -1655,15 +1690,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_KEYDOWN => {
             let key = wparam.0 as u32;
-            let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
-            if key == VK_C.0 as u32 && ctrl {
-                copy_and_close();
-            } else if key == VK_S.0 as u32 && ctrl {
-                save_and_close();
-            } else if key == VK_ESCAPE.0 as u32 {
+            let options = current_options();
+            let mods = active_modifiers();
+            if key == VK_ESCAPE.0 as u32 {
                 cancel_and_close();
             } else if key == VK_RETURN.0 as u32 {
                 copy_and_close();
+            } else if options.copy_hotkey.matches(key, mods) {
+                copy_and_close();
+            } else if options.save_hotkey.matches(key, mods) {
+                save_and_close();
             }
             LRESULT(0)
         }

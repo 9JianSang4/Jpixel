@@ -265,12 +265,7 @@ pub fn run() {
             };
             let native_options = {
                 let cfg = config::lock_or_warn!(config);
-                overlay::OverlayOptions {
-                    crosshair_guides: cfg.crosshair_guides,
-                    selection_mode: cfg.selection_mode,
-                    double_press_enabled: cfg.double_press_enabled,
-                    double_press_window_ms: cfg.double_press_speed.window_ms(),
-                }
+                config::native_overlay_options(&cfg)
             };
             if let Err(e) = overlay::start(&native_hotkey, native_options) {
                 log::error!("Failed to start native overlay with '{native_hotkey}': {e}");
