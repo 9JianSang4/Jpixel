@@ -875,7 +875,30 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
             back.blend_hline(y, left, left + size, (r, g, b), state.pen_alpha);
         }
 
-        // Frame only: never fill the preview with the border brush.
+        // Inset alpha track: never touches the border, so all four edges stay 1px.
+        let track = RECT {
+            left: left + 4,
+            top: top + size - 7,
+            right: left + size - 4,
+            bottom: top + size - 4,
+        };
+        let track_brush = CreateSolidBrush(rgb(54, 54, 58));
+        let _ = FillRect(hdc, &track, track_brush);
+        let _ = DeleteObject(HGDIOBJ(track_brush.0));
+
+        let track_width = track.right - track.left;
+        let fill_width = (track_width * state.pen_alpha as i32 / 255).max(1);
+        let fill = RECT {
+            left: track.left,
+            top: track.top,
+            right: (track.left + fill_width).min(track.right),
+            bottom: track.bottom,
+        };
+        let fill_brush = CreateSolidBrush(rgb(255, 255, 255));
+        let _ = FillRect(hdc, &fill, fill_brush);
+        let _ = DeleteObject(HGDIOBJ(fill_brush.0));
+
+        // Frame last: a clean 1px border on every side.
         let frame = RECT {
             left,
             top,
@@ -885,17 +908,6 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
         let border = CreateSolidBrush(rgb(255, 255, 255));
         let _ = FrameRect(hdc, &frame, border);
         let _ = DeleteObject(HGDIOBJ(border.0));
-
-        let alpha_width = ((size - 4) as u32 * state.pen_alpha as u32 / 255) as i32;
-        let bar = RECT {
-            left: left + 2,
-            top: top + size - 4,
-            right: left + 2 + alpha_width,
-            bottom: top + size - 1,
-        };
-        let bar_brush = CreateSolidBrush(rgb(255, 255, 255));
-        let _ = FillRect(hdc, &bar, bar_brush);
-        let _ = DeleteObject(HGDIOBJ(bar_brush.0));
     }
 }
 
