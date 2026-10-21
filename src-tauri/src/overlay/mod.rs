@@ -32,16 +32,17 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, ReleaseCapture, SetActiveWindow, SetCapture, SetFocus, UnregisterHotKey,
-    HOT_KEY_MODIFIERS, MOD_NOREPEAT, VK_ESCAPE, VK_RETURN,
+    GetKeyState, RegisterHotKey, ReleaseCapture, SetActiveWindow, SetCapture, SetFocus,
+    UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT, VK_C, VK_CONTROL, VK_ESCAPE, VK_RETURN,
+    VK_S,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, ClipCursor, CreateWindowExW, DefWindowProcW, DispatchMessageW,
     GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, LoadCursorW, MessageBoxW,
     PostMessageW, PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowPos,
-    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW, IDC_CROSS,
-    IDC_HAND, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_SIZEALL, MB_ICONERROR, MB_OK,
-    MSG, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY,
+    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW,
+    IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_SIZEALL, MB_ICONERROR, MB_OK, MSG,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY,
     WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
     WM_SETCURSOR, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -253,7 +254,7 @@ pub fn init() -> Result<()> {
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(wndproc),
         hInstance: hinstance,
-        hCursor: unsafe { LoadCursorW(None, IDC_CROSS)? },
+        hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
         hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(0),
         lpszClassName: CLASS_NAME,
         ..Default::default()
@@ -730,6 +731,19 @@ fn toolbar_button_enabled(_state: &OverlayState, button: ToolbarButton) -> bool 
     }
 }
 
+fn toolbar_glyph(button: ToolbarButton) -> char {
+    match button {
+        ToolbarButton::Copy => '\u{E8C8}',
+        ToolbarButton::Save => '\u{E74E}',
+        ToolbarButton::Pin => '\u{E718}',
+        ToolbarButton::Pen => '\u{E70F}',
+        ToolbarButton::Eraser => '\u{E75C}',
+        ToolbarButton::Undo => '\u{E7A7}',
+        ToolbarButton::Redo => '\u{E7A6}',
+        ToolbarButton::Close => '\u{E711}',
+    }
+}
+
 fn draw_toolbar(hdc: HDC, state: &OverlayState) -> Result<()> {
     let Some(toolbar) = toolbar_rect(state) else {
         return Ok(());
@@ -752,7 +766,7 @@ fn draw_toolbar(hdc: HDC, state: &OverlayState) -> Result<()> {
         let _ = DeleteObject(HGDIOBJ(background.0));
 
         let font: HFONT = CreateFontW(
-            -12,
+            -16,
             0,
             0,
             0,
@@ -765,7 +779,7 @@ fn draw_toolbar(hdc: HDC, state: &OverlayState) -> Result<()> {
             CLIP_DEFAULT_PRECIS.0 as u32,
             CLEARTYPE_QUALITY.0 as u32,
             DEFAULT_PITCH.0 as u32,
-            w!("Microsoft YaHei UI"),
+            w!("Segoe MDL2 Assets"),
         );
         let old_font = SelectObject(hdc, HGDIOBJ(font.0));
         let _ = SetBkMode(hdc, TRANSPARENT);
@@ -781,18 +795,13 @@ fn draw_toolbar(hdc: HDC, state: &OverlayState) -> Result<()> {
                 SelectObject(hdc, old);
                 let _ = DeleteObject(HGDIOBJ(hover.0));
             }
-            let label = TOOLBAR_ITEMS
-                .iter()
-                .find(|(item, _)| *item == button)
-                .map(|(_, label)| *label)
-                .unwrap_or("");
             let color = if enabled {
                 rgb(245, 245, 245)
             } else {
                 rgb(125, 125, 130)
             };
             let _ = SetTextColor(hdc, color);
-            let mut text: Vec<u16> = label.encode_utf16().collect();
+            let mut text: Vec<u16> = vec![toolbar_glyph(button) as u16];
             let mut text_rect = rect;
             let _ = DrawTextW(
                 hdc,
@@ -1006,8 +1015,8 @@ fn update_cursor(hwnd: HWND) {
     };
     let options = current_options();
     let cursor = if toolbar.is_some() {
-        IDC_HAND
-    } else if options.selection_mode == SelectionMode::Resize {
+        IDC_ARROW
+    } else if options.selection_mode == SelectionMode::Resize && selection.is_some() {
         if let Some(handle) = handle {
             handle_cursor(handle)
         } else if selection
@@ -1024,7 +1033,9 @@ fn update_cursor(hwnd: HWND) {
             IDC_ARROW
         }
     } else {
-        IDC_CROSS
+        // Unified behavior: normal arrow before selection, while dragging a new
+        // selection, and after selection in reselect mode.
+        IDC_ARROW
     };
     unsafe {
         if let Ok(cursor) = LoadCursorW(None, cursor) {
@@ -1592,6 +1603,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             .unwrap_or(false);
             let _ = was_adjusting;
             gdi::invalidate(hwnd);
+            update_cursor(hwnd);
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
@@ -1607,9 +1619,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_KEYDOWN => {
-            if wparam.0 == VK_ESCAPE.0 as usize {
+            let key = wparam.0 as u32;
+            let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+            if key == VK_C.0 as u32 && ctrl {
+                copy_and_close();
+            } else if key == VK_S.0 as u32 && ctrl {
+                save_and_close();
+            } else if key == VK_ESCAPE.0 as u32 {
                 cancel_and_close();
-            } else if wparam.0 == VK_RETURN.0 as usize {
+            } else if key == VK_RETURN.0 as u32 {
                 copy_and_close();
             }
             LRESULT(0)
