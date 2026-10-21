@@ -4,6 +4,7 @@
 mod gdi;
 
 use self::gdi::Dib;
+use crate::config::SelectionMode;
 use crate::core::monitor::{self, MonitorInfo};
 use anyhow::{anyhow, Result};
 use arboard::{Clipboard, ImageData};
@@ -14,14 +15,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
-use windows::core::{w, PCWSTR};
+use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, GetStockObject,
-    RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, CLEARTYPE_QUALITY,
-    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
-    FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
+    GetStockObject, LineTo, MoveToEx, RoundRect, ScreenToClient, SelectObject, SetBkMode,
+    SetTextColor, UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_DOT, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -33,17 +35,71 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, ClipCursor, CreateWindowExW, DefWindowProcW, DispatchMessageW,
-    GetForegroundWindow, GetMessageW, GetWindowRect, LoadCursorW, PostMessageW, PostQuitMessage,
-    RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
-    CS_VREDRAW, HWND_TOPMOST, IDC_CROSS, MSG, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CAPTURECHANGED,
-    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_PAINT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, LoadCursorW, MessageBoxW,
+    PostMessageW, PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowPos,
+    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW, IDC_CROSS,
+    IDC_HAND, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_SIZEALL, MB_ICONERROR, MB_OK,
+    MSG, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY,
+    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_SETCURSOR, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 const HOTKEY_ID: i32 = 0x4A50; // "JP"
 const WM_APP_SET_HOTKEY: u32 = 0x8001;
+const WM_APP_SET_OPTIONS: u32 = 0x8002;
 const CLASS_NAME: PCWSTR = w!("JpixelNativeOverlay");
 static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
+
+#[derive(Debug, Clone, Copy)]
+pub struct OverlayOptions {
+    pub crosshair_guides: bool,
+    pub selection_mode: SelectionMode,
+}
+
+impl Default for OverlayOptions {
+    fn default() -> Self {
+        Self {
+            crosshair_guides: true,
+            selection_mode: SelectionMode::Reselect,
+        }
+    }
+}
+
+static OPTIONS: Mutex<OverlayOptions> = Mutex::new(OverlayOptions {
+    crosshair_guides: true,
+    selection_mode: SelectionMode::Reselect,
+});
+
+fn current_options() -> OverlayOptions {
+    OPTIONS
+        .lock()
+        .map(|options| *options)
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeHandle {
+    NorthWest,
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResizeDrag {
+    handle: ResizeHandle,
+    start_rect: RECT,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MoveDrag {
+    start_rect: RECT,
+    start_point: POINT,
+}
 
 struct HotkeyRequest {
     vk: u32,
@@ -124,6 +180,9 @@ struct OverlayState {
     capture_ms: f64,
     first_frame_ms: f64,
     hover_button: Option<ToolbarButton>,
+    cursor: Option<POINT>,
+    resize_drag: Option<ResizeDrag>,
+    move_drag: Option<MoveDrag>,
 }
 
 impl OverlayState {
@@ -149,6 +208,9 @@ impl OverlayState {
             capture_ms: 0.0,
             first_frame_ms: 0.0,
             hover_button: None,
+            cursor: None,
+            resize_drag: None,
+            move_drag: None,
         }
     }
 }
@@ -228,8 +290,27 @@ pub fn init() -> Result<()> {
     Ok(())
 }
 
+/// Update live overlay options from the settings thread.
+pub fn set_options(crosshair_guides: bool, selection_mode: SelectionMode) {
+    if let Ok(mut options) = OPTIONS.lock() {
+        *options = OverlayOptions {
+            crosshair_guides,
+            selection_mode,
+        };
+    }
+    let raw = OVERLAY_HWND.load(Ordering::SeqCst);
+    if raw != 0 {
+        unsafe {
+            let _ = PostMessageW(HWND(raw), WM_APP_SET_OPTIONS, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 /// Start the native overlay on its own Win32 message-loop thread.
-pub fn start(hotkey: &str) -> Result<()> {
+pub fn start(hotkey: &str, options: OverlayOptions) -> Result<()> {
+    if let Ok(mut current) = OPTIONS.lock() {
+        *current = options;
+    }
     let parsed = crate::core::hotkey::parse(hotkey)
         .map_err(|e| anyhow!("invalid native hotkey '{hotkey}': {e}"))?;
     std::thread::Builder::new()
@@ -470,6 +551,16 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
     let dimmed = Dib::dimmed_from_rgba(&image)?;
     let back = Dib::blank(monitor.width(), monitor.height())?;
     let foreground = unsafe { GetForegroundWindow() };
+    let initial_cursor = {
+        let mut cursor = POINT::default();
+        if unsafe { GetCursorPos(&mut cursor) }.is_ok() {
+            cursor.x -= monitor.rect.left;
+            cursor.y -= monitor.rect.top;
+            Some(cursor)
+        } else {
+            None
+        }
+    };
 
     let hwnd = with_state_mut(|state| {
         // On a re-capture the overlay itself may still be the foreground
@@ -484,6 +575,9 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.end = None;
         state.dragging = false;
         state.hover_button = None;
+        state.cursor = initial_cursor;
+        state.resize_drag = None;
+        state.move_drag = None;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -718,6 +812,226 @@ fn handle_toolbar_click(button: ToolbarButton) {
         ToolbarButton::Save => save_and_close(),
         ToolbarButton::Close => cancel_and_close(),
         other => log::debug!("toolbar button {:?} is not implemented yet", other),
+    }
+}
+
+const HANDLE_SIZE: i32 = 7;
+
+fn selection_handle_rects(state: &OverlayState) -> Vec<(ResizeHandle, RECT)> {
+    if current_options().selection_mode != SelectionMode::Resize {
+        return Vec::new();
+    }
+    let Some(selection) = selection_rect(state) else {
+        return Vec::new();
+    };
+    let cx = (selection.left + selection.right) / 2;
+    let cy = (selection.top + selection.bottom) / 2;
+    let half = HANDLE_SIZE / 2;
+    let positions = [
+        (ResizeHandle::NorthWest, selection.left, selection.top),
+        (ResizeHandle::North, cx, selection.top),
+        (ResizeHandle::NorthEast, selection.right, selection.top),
+        (ResizeHandle::East, selection.right, cy),
+        (ResizeHandle::SouthEast, selection.right, selection.bottom),
+        (ResizeHandle::South, cx, selection.bottom),
+        (ResizeHandle::SouthWest, selection.left, selection.bottom),
+        (ResizeHandle::West, selection.left, cy),
+    ];
+    positions
+        .into_iter()
+        .map(|(handle, x, y)| {
+            (
+                handle,
+                RECT {
+                    left: x - half,
+                    top: y - half,
+                    right: x + half + 1,
+                    bottom: y + half + 1,
+                },
+            )
+        })
+        .collect()
+}
+
+fn selection_handle_at(state: &OverlayState, point: POINT) -> Option<ResizeHandle> {
+    selection_handle_rects(state)
+        .into_iter()
+        .find(|(_, rect)| {
+            point.x >= rect.left
+                && point.x < rect.right
+                && point.y >= rect.top
+                && point.y < rect.bottom
+        })
+        .map(|(handle, _)| handle)
+}
+
+fn handle_cursor(handle: ResizeHandle) -> PCWSTR {
+    match handle {
+        ResizeHandle::NorthWest | ResizeHandle::SouthEast => IDC_SIZENWSE,
+        ResizeHandle::NorthEast | ResizeHandle::SouthWest => IDC_SIZENESW,
+        ResizeHandle::North | ResizeHandle::South => IDC_SIZENS,
+        ResizeHandle::East | ResizeHandle::West => IDC_SIZEWE,
+    }
+}
+
+fn image_bounds(state: &OverlayState) -> Option<RECT> {
+    let image = state.image.as_ref()?;
+    Some(RECT {
+        left: 0,
+        top: 0,
+        right: image.width() as i32,
+        bottom: image.height() as i32,
+    })
+}
+
+fn set_selection(state: &mut OverlayState, rect: RECT) {
+    state.start = Some(POINT {
+        x: rect.left,
+        y: rect.top,
+    });
+    state.end = Some(POINT {
+        x: rect.right,
+        y: rect.bottom,
+    });
+}
+
+fn resize_selection(rect: RECT, handle: ResizeHandle, point: POINT, bounds: RECT) -> RECT {
+    let mut next = rect;
+    match handle {
+        ResizeHandle::NorthWest => {
+            next.left = point.x;
+            next.top = point.y;
+        }
+        ResizeHandle::North => next.top = point.y,
+        ResizeHandle::NorthEast => {
+            next.right = point.x;
+            next.top = point.y;
+        }
+        ResizeHandle::East => next.right = point.x,
+        ResizeHandle::SouthEast => {
+            next.right = point.x;
+            next.bottom = point.y;
+        }
+        ResizeHandle::South => next.bottom = point.y,
+        ResizeHandle::SouthWest => {
+            next.left = point.x;
+            next.bottom = point.y;
+        }
+        ResizeHandle::West => next.left = point.x,
+    }
+    next.left = next.left.clamp(bounds.left, bounds.right);
+    next.top = next.top.clamp(bounds.top, bounds.bottom);
+    next.right = next.right.clamp(bounds.left, bounds.right);
+    next.bottom = next.bottom.clamp(bounds.top, bounds.bottom);
+
+    if next.right - next.left < 3 {
+        match handle {
+            ResizeHandle::West | ResizeHandle::NorthWest | ResizeHandle::SouthWest => {
+                next.left = (next.right - 3).max(bounds.left);
+            }
+            _ => next.right = (next.left + 3).min(bounds.right),
+        }
+    }
+    if next.bottom - next.top < 3 {
+        match handle {
+            ResizeHandle::North | ResizeHandle::NorthWest | ResizeHandle::NorthEast => {
+                next.top = (next.bottom - 3).max(bounds.top);
+            }
+            _ => next.bottom = (next.top + 3).min(bounds.bottom),
+        }
+    }
+    next
+}
+
+fn move_selection(rect: RECT, delta: POINT, bounds: RECT) -> RECT {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    let left = (rect.left + delta.x).clamp(bounds.left, (bounds.right - width).max(bounds.left));
+    let top = (rect.top + delta.y).clamp(bounds.top, (bounds.bottom - height).max(bounds.top));
+    RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+fn draw_crosshair(hdc: HDC, state: &OverlayState) -> Result<()> {
+    if !current_options().crosshair_guides {
+        return Ok(());
+    }
+    let (Some(point), Some(bounds)) = (state.cursor, image_bounds(state)) else {
+        return Ok(());
+    };
+    unsafe {
+        let pen = CreatePen(PS_DOT, 1, rgb(64, 190, 255));
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = MoveToEx(hdc, bounds.left, point.y, None);
+        let _ = LineTo(hdc, bounds.right, point.y);
+        let _ = MoveToEx(hdc, point.x, bounds.top, None);
+        let _ = LineTo(hdc, point.x, bounds.bottom);
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+    Ok(())
+}
+
+fn draw_handles(hdc: HDC, state: &OverlayState) -> Result<()> {
+    if current_options().selection_mode != SelectionMode::Resize {
+        return Ok(());
+    }
+    unsafe {
+        let brush = CreateSolidBrush(rgb(255, 255, 255));
+        for (_, rect) in selection_handle_rects(state) {
+            let _ = windows::Win32::Graphics::Gdi::FillRect(hdc, &rect, brush);
+        }
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+    }
+    Ok(())
+}
+
+fn update_cursor(hwnd: HWND) {
+    let mut point = POINT::default();
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return;
+    }
+    let _ = unsafe { ScreenToClient(hwnd, &mut point) };
+    let state = with_state(|state| {
+        (
+            toolbar_button_at(state, point),
+            selection_rect(state),
+            selection_handle_at(state, point),
+        )
+    });
+    let Ok((toolbar, selection, handle)) = state else {
+        return;
+    };
+    let options = current_options();
+    let cursor = if toolbar.is_some() {
+        IDC_HAND
+    } else if options.selection_mode == SelectionMode::Resize {
+        if let Some(handle) = handle {
+            handle_cursor(handle)
+        } else if selection
+            .map(|rect| {
+                point.x >= rect.left
+                    && point.x < rect.right
+                    && point.y >= rect.top
+                    && point.y < rect.bottom
+            })
+            .unwrap_or(false)
+        {
+            IDC_SIZEALL
+        } else {
+            IDC_ARROW
+        }
+    } else {
+        IDC_CROSS
+    };
+    unsafe {
+        if let Ok(cursor) = LoadCursorW(None, cursor) {
+            let _ = SetCursor(cursor);
+        }
     }
 }
 
@@ -968,15 +1282,69 @@ fn save_current_selection() -> Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 
+fn show_error(message: &str) {
+    let text = HSTRING::from(message);
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            w!("Jpixel"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+fn hide_for_save_dialog() -> HWND {
+    release_cursor_clip();
+    let hwnd = with_state(|state| state.hwnd).unwrap_or(HWND(0));
+    if hwnd.0 != 0 {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+    hwnd
+}
+
+fn restore_after_save_dialog(hwnd: HWND) {
+    if hwnd.0 == 0 {
+        return;
+    }
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+    }
+    force_foreground(hwnd);
+    gdi::invalidate(hwnd);
+}
+
 fn save_and_close() {
+    // The overlay is topmost and full-screen; hide it while the native save
+    // dialog is open so the dialog is never covered. On cancel, restore the
+    // selection and the overlay.
+    let hwnd = hide_for_save_dialog();
     match save_current_selection() {
         Ok(Some(path)) => {
             report_current("save", None);
             log::info!("saved native capture to {}", path.display());
             hide_overlay();
         }
-        Ok(None) => log::debug!("native save cancelled"),
-        Err(e) => log::error!("native save failed: {e}"),
+        Ok(None) => {
+            log::debug!("native save cancelled");
+            restore_after_save_dialog(hwnd);
+        }
+        Err(e) => {
+            log::error!("native save failed: {e}");
+            restore_after_save_dialog(hwnd);
+            show_error(&format!("保存失败：{e}"));
+        }
     }
 }
 
@@ -1015,6 +1383,8 @@ fn paint(hwnd: HWND) {
             {
                 if let Err(e) =
                     gdi::paint_overlay(hwnd, back, dimmed, original, selection_rect(state), |hdc| {
+                        draw_crosshair(hdc, state)?;
+                        draw_handles(hdc, state)?;
                         draw_toolbar(hdc, state)
                     })
                 {
@@ -1074,11 +1444,54 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        WM_SETCURSOR => {
+            update_cursor(hwnd);
+            LRESULT(1)
+        }
         WM_LBUTTONDOWN => {
             let pt = point_from_lparam(lparam);
             if let Ok(Some(button)) = with_state(|state| toolbar_button_at(state, pt)) {
                 handle_toolbar_click(button);
                 return LRESULT(0);
+            }
+            let options = current_options();
+            if options.selection_mode == SelectionMode::Resize {
+                let selection = with_state(selection_rect).ok().flatten();
+                if let Some(selection) = selection {
+                    if let Some(handle) = with_state(|state| selection_handle_at(state, pt))
+                        .ok()
+                        .flatten()
+                    {
+                        let _ = SetCapture(hwnd);
+                        clip_cursor_to_window(hwnd);
+                        with_state_mut(|state| {
+                            state.resize_drag = Some(ResizeDrag {
+                                handle,
+                                start_rect: selection,
+                            });
+                            Ok(())
+                        })
+                        .ok();
+                        return LRESULT(0);
+                    }
+                    if pt.x >= selection.left
+                        && pt.x < selection.right
+                        && pt.y >= selection.top
+                        && pt.y < selection.bottom
+                    {
+                        let _ = SetCapture(hwnd);
+                        clip_cursor_to_window(hwnd);
+                        with_state_mut(|state| {
+                            state.move_drag = Some(MoveDrag {
+                                start_rect: selection,
+                                start_point: pt,
+                            });
+                            Ok(())
+                        })
+                        .ok();
+                        return LRESULT(0);
+                    }
+                }
             }
             let _ = SetCapture(hwnd);
             clip_cursor_to_window(hwnd);
@@ -1089,6 +1502,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let clamped = clamp_to_image(state, pt);
                 state.dragging = true;
                 state.hover_button = None;
+                state.resize_drag = None;
+                state.move_drag = None;
                 state.start = Some(clamped);
                 state.end = Some(clamped);
                 Ok(())
@@ -1100,6 +1515,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_MOUSEMOVE => {
             let pt = point_from_lparam(lparam);
             let changed = with_state_mut(|state| {
+                state.cursor = Some(pt);
+                if let Some(drag) = state.resize_drag {
+                    if let Some(bounds) = image_bounds(state) {
+                        let next = resize_selection(drag.start_rect, drag.handle, pt, bounds);
+                        set_selection(state, next);
+                    }
+                    return Ok(true);
+                }
+                if let Some(drag) = state.move_drag {
+                    if let Some(bounds) = image_bounds(state) {
+                        let delta = POINT {
+                            x: pt.x - drag.start_point.x,
+                            y: pt.y - drag.start_point.y,
+                        };
+                        let next = move_selection(drag.start_rect, delta, bounds);
+                        set_selection(state, next);
+                    }
+                    return Ok(true);
+                }
                 if state.dragging {
                     state.end = Some(clamp_to_image(state, pt));
                     return Ok(true);
@@ -1120,18 +1554,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_LBUTTONUP => {
             let _ = ReleaseCapture();
             release_cursor_clip();
-            with_state_mut(|state| {
+            let was_adjusting = with_state_mut(|state| {
+                let adjusting = state.resize_drag.is_some() || state.move_drag.is_some();
+                state.resize_drag = None;
+                state.move_drag = None;
                 state.dragging = false;
                 state.hover_button = None;
-                if let Some(rect) = selection_rect(state) {
-                    if rect.right - rect.left < 3 || rect.bottom - rect.top < 3 {
-                        state.start = None;
-                        state.end = None;
+                if !adjusting {
+                    if let Some(rect) = selection_rect(state) {
+                        if rect.right - rect.left < 3 || rect.bottom - rect.top < 3 {
+                            state.start = None;
+                            state.end = None;
+                        }
                     }
                 }
-                Ok(())
+                Ok(adjusting)
             })
-            .ok();
+            .unwrap_or(false);
+            let _ = was_adjusting;
             gdi::invalidate(hwnd);
             LRESULT(0)
         }
@@ -1140,6 +1580,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_state_mut(|state| {
                 state.dragging = false;
                 state.hover_button = None;
+                state.resize_drag = None;
+                state.move_drag = None;
                 Ok(())
             })
             .ok();
@@ -1155,6 +1597,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_APP_SET_HOTKEY => {
             handle_pending_hotkey();
+            LRESULT(0)
+        }
+        WM_APP_SET_OPTIONS => {
+            gdi::invalidate(hwnd);
             LRESULT(0)
         }
         WM_HOTKEY => {

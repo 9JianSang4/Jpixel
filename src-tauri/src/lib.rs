@@ -226,6 +226,10 @@ pub fn run() {
             config::set_pin_hotkey,
             config::get_auto_launch,
             config::set_auto_launch,
+            config::get_crosshair_guides,
+            config::set_crosshair_guides,
+            config::get_selection_mode,
+            config::set_selection_mode,
             config::get_default_action,
             config::set_default_action,
             // Clipboard
@@ -257,7 +261,14 @@ pub fn run() {
                 let cfg = config::lock_or_warn!(config);
                 cfg.screenshot_hotkey.clone()
             };
-            if let Err(e) = overlay::start(&native_hotkey) {
+            let native_options = {
+                let cfg = config::lock_or_warn!(config);
+                overlay::OverlayOptions {
+                    crosshair_guides: cfg.crosshair_guides,
+                    selection_mode: cfg.selection_mode,
+                }
+            };
+            if let Err(e) = overlay::start(&native_hotkey, native_options) {
                 log::error!("Failed to start native overlay with '{native_hotkey}': {e}");
             }
 

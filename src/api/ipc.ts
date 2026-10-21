@@ -175,6 +175,24 @@ export async function setAutoLaunch(enabled: boolean): Promise<void> {
   return invoke("set_auto_launch", { value: enabled });
 }
 
+export type SelectionMode = "reselect" | "resize";
+
+export async function getCrosshairGuides(): Promise<boolean> {
+  return invoke("get_crosshair_guides");
+}
+
+export async function setCrosshairGuides(enabled: boolean): Promise<void> {
+  return invoke("set_crosshair_guides", { value: enabled });
+}
+
+export async function getSelectionMode(): Promise<SelectionMode> {
+  return invoke("get_selection_mode");
+}
+
+export async function setSelectionMode(mode: SelectionMode): Promise<void> {
+  return invoke("set_selection_mode", { value: mode });
+}
+
 export async function getDefaultAction(): Promise<string> {
   return invoke("get_default_action");
 }

@@ -30,6 +30,14 @@ pub struct AppConfig {
     pub auto_launch: bool,
     #[serde(default)]
     pub default_action: DefaultAction,
+    #[serde(default = "default_crosshair_guides")]
+    pub crosshair_guides: bool,
+    #[serde(default)]
+    pub selection_mode: SelectionMode,
+}
+
+fn default_crosshair_guides() -> bool {
+    true
 }
 
 fn default_hotkey_alt_x() -> String {
@@ -53,6 +61,21 @@ impl Default for DefaultAction {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionMode {
+    /// Dragging after a selection starts a new selection; cursor stays a cross.
+    Reselect,
+    /// Show handles; drag a handle to resize, drag inside to move.
+    Resize,
+}
+
+impl Default for SelectionMode {
+    fn default() -> Self {
+        SelectionMode::Reselect
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -63,6 +86,8 @@ impl Default for AppConfig {
             pin_hotkey: "Ctrl+T".to_string(),
             auto_launch: false,
             default_action: DefaultAction::SaveAndEdit,
+            crosshair_guides: true,
+            selection_mode: SelectionMode::Reselect,
         }
     }
 }
@@ -201,6 +226,36 @@ config_getter!(get_default_action, default_action, DefaultAction);
 config_setter!(set_default_action, default_action, DefaultAction);
 
 config_getter!(get_auto_launch, auto_launch, bool);
+config_getter!(get_crosshair_guides, crosshair_guides, bool);
+config_getter!(get_selection_mode, selection_mode, SelectionMode);
+
+#[tauri::command]
+pub fn set_crosshair_guides(
+    app: AppHandle,
+    config: State<ConfigArc>,
+    value: bool,
+) -> Result<(), JpixelError> {
+    let mut cfg = lock_or_warn!(config);
+    cfg.crosshair_guides = value;
+    let clone = cfg.clone();
+    drop(cfg);
+    crate::overlay::set_options(clone.crosshair_guides, clone.selection_mode);
+    save_config(&app, &clone)
+}
+
+#[tauri::command]
+pub fn set_selection_mode(
+    app: AppHandle,
+    config: State<ConfigArc>,
+    value: SelectionMode,
+) -> Result<(), JpixelError> {
+    let mut cfg = lock_or_warn!(config);
+    cfg.selection_mode = value;
+    let clone = cfg.clone();
+    drop(cfg);
+    crate::overlay::set_options(clone.crosshair_guides, clone.selection_mode);
+    save_config(&app, &clone)
+}
 
 
 /// Update the auto-launch registry entry.

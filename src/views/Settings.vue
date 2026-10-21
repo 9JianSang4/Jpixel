@@ -111,6 +111,43 @@
             </svg>
           </div>
         </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">十字辅助线</div>
+            <p class="setting-desc">在光标处显示横向/纵向辅助线，方便对齐边缘。</p>
+          </div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              v-model="crosshairGuides"
+              aria-label="十字辅助线"
+              @change="onCrosshairChange"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">选后操作</div>
+            <p class="setting-desc">拖动重选保持十字准星；调整大小显示控制点。</p>
+          </div>
+          <div class="select-wrap">
+            <select
+              v-model="selectionMode"
+              class="select-input"
+              aria-label="选后操作"
+              @change="onSelectionModeChange"
+            >
+              <option value="reselect">拖动重选</option>
+              <option value="resize">调整大小</option>
+            </select>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m7 10 5 5 5-5" />
+            </svg>
+          </div>
+        </div>
       </section>
 
       <template v-if="activeSection === 'shortcuts'">
@@ -275,6 +312,11 @@ import {
   setPinHotkey,
   getDefaultAction,
   setDefaultAction,
+  getCrosshairGuides,
+  setCrosshairGuides,
+  getSelectionMode,
+  setSelectionMode,
+  type SelectionMode,
 } from "../api/ipc";
 import { formatHotkey } from "../utils/hotkey";
 
@@ -287,6 +329,8 @@ const copyHotkey = ref("Ctrl+C");
 const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
 const defaultAction = ref("save_and_edit");
+const crosshairGuides = ref(true);
+const selectionMode = ref<SelectionMode>("reselect");
 const recordingMode = ref<string | null>(null);
 const hotkeyError = ref<string | null>(null);
 
@@ -313,6 +357,8 @@ onMounted(async () => {
     saveHotkey.value = await getSaveHotkey();
     pinHotkey.value = await getPinHotkey();
     defaultAction.value = await getDefaultAction();
+    crosshairGuides.value = await getCrosshairGuides();
+    selectionMode.value = await getSelectionMode();
   } catch (e) {
     console.error("Failed to load settings:", e);
   }
@@ -333,6 +379,18 @@ function onToggle() {
 function onDefaultActionChange() {
   setDefaultAction(defaultAction.value).catch((err: unknown) => {
     console.error("Failed to set default action:", err);
+  });
+}
+
+function onCrosshairChange() {
+  setCrosshairGuides(crosshairGuides.value).catch((err: unknown) => {
+    console.error("Failed to set crosshair guides:", err);
+  });
+}
+
+function onSelectionModeChange() {
+  setSelectionMode(selectionMode.value).catch((err: unknown) => {
+    console.error("Failed to set selection mode:", err);
   });
 }
 
