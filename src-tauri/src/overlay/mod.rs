@@ -171,12 +171,20 @@ enum DrawTool {
 }
 
 #[derive(Debug, Clone)]
+struct EraserSegment {
+    width: i32,
+    points: Vec<POINT>,
+}
+
+#[derive(Debug, Clone)]
 struct Stroke {
     tool: DrawTool,
     color: COLORREF,
     alpha: u8,
     width: i32,
     points: Vec<POINT>,
+    /// Completed eraser sub-strokes. Width changes only affect later points.
+    segments: Vec<EraserSegment>,
 }
 
 const PEN_PALETTE: [(u8, u8, u8); 9] = [
@@ -1351,6 +1359,7 @@ fn begin_stroke(hwnd: HWND, point: POINT, tool: DrawTool) -> bool {
             alpha,
             width,
             points: vec![point],
+            segments: Vec::new(),
         });
         let _ = refresh_annotated(state);
         Ok(true)
@@ -1518,10 +1527,48 @@ fn paint_brush(canvas: &mut RgbaImage, center: POINT, radius: i32, color: (u8, u
     }
 }
 
+fn erase_brush(canvas: &mut RgbaImage, base: &RgbaImage, cx: i32, cy: i32, radius: i32) {
+    for y in (cy - radius)..=(cy + radius) {
+        for x in (cx - radius)..=(cx + radius) {
+            if x >= 0 && y >= 0 && x < canvas.width() as i32 && y < canvas.height() as i32 {
+                let pixel = *base.get_pixel(x as u32, y as u32);
+                canvas.put_pixel(x as u32, y as u32, pixel);
+            }
+        }
+    }
+}
+
+fn render_eraser_points(
+    canvas: &mut RgbaImage,
+    base: &RgbaImage,
+    width: i32,
+    points: &[POINT],
+) {
+    if points.is_empty() {
+        return;
+    }
+    let radius = (width / 2).max(1);
+    if points.len() == 1 {
+        erase_brush(canvas, base, points[0].x, points[0].y, radius);
+        return;
+    }
+    for pair in points.windows(2) {
+        let dx = pair[1].x - pair[0].x;
+        let dy = pair[1].y - pair[0].y;
+        let steps = dx.abs().max(dy.abs()).max(1);
+        for index in 0..=steps {
+            let t = index as f32 / steps as f32;
+            let cx = pair[0].x + (dx as f32 * t).round() as i32;
+            let cy = pair[0].y + (dy as f32 * t).round() as i32;
+            erase_brush(canvas, base, cx, cy, radius);
+        }
+    }
+}
+
 fn render_strokes(base: &RgbaImage, strokes: &[Stroke], active: Option<&Stroke>) -> RgbaImage {
     let mut canvas = base.clone();
     for stroke in strokes.iter().chain(active.into_iter()) {
-        if stroke.points.is_empty() {
+        if stroke.points.is_empty() && stroke.segments.is_empty() {
             continue;
         }
         match stroke.tool {
@@ -1545,29 +1592,10 @@ fn render_strokes(base: &RgbaImage, strokes: &[Stroke], active: Option<&Stroke>)
                 }
             }
             DrawTool::Eraser => {
-                let radius = (stroke.width / 2).max(1);
-                for pair in stroke.points.windows(2) {
-                    let dx = pair[1].x - pair[0].x;
-                    let dy = pair[1].y - pair[0].y;
-                    let steps = dx.abs().max(dy.abs()).max(1);
-                    for index in 0..=steps {
-                        let t = index as f32 / steps as f32;
-                        let cx = pair[0].x + (dx as f32 * t).round() as i32;
-                        let cy = pair[0].y + (dy as f32 * t).round() as i32;
-                        for y in (cy - radius)..=(cy + radius) {
-                            for x in (cx - radius)..=(cx + radius) {
-                                if x >= 0
-                                    && y >= 0
-                                    && x < canvas.width() as i32
-                                    && y < canvas.height() as i32
-                                {
-                                    let pixel = *base.get_pixel(x as u32, y as u32);
-                                    canvas.put_pixel(x as u32, y as u32, pixel);
-                                }
-                            }
-                        }
-                    }
+                for segment in &stroke.segments {
+                    render_eraser_points(&mut canvas, base, segment.width, &segment.points);
                 }
+                render_eraser_points(&mut canvas, base, stroke.width, &stroke.points);
             }
         }
     }
@@ -2121,7 +2149,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         .clamp(ERASER_MIN_WIDTH, ERASER_MAX_WIDTH);
                     state.eraser_width = next;
                     if let Some(stroke) = state.active_stroke.as_mut() {
-                        stroke.width = next;
+                        let old_width = stroke.width;
+                        if old_width != next {
+                            if let Some(last) = stroke.points.last().copied() {
+                                let points = std::mem::take(&mut stroke.points);
+                                stroke.segments.push(EraserSegment {
+                                    width: old_width,
+                                    points,
+                                });
+                                stroke.points = vec![last];
+                            }
+                            stroke.width = next;
+                        }
                     }
                     let _ = refresh_annotated(state);
                     Ok(())
@@ -2387,6 +2426,7 @@ mod tests {
             alpha: 255,
             width: 3,
             points: vec![POINT { x: 2, y: 5 }, POINT { x: 8, y: 5 }],
+            segments: Vec::new(),
         };
         let rendered = render_strokes(&base, &[stroke], None);
         assert_eq!(rendered.get_pixel(5, 5), &Rgba([255, 70, 70, 255]));
@@ -2401,6 +2441,7 @@ mod tests {
             alpha: 255,
             width: 3,
             points: vec![POINT { x: 2, y: 5 }, POINT { x: 8, y: 5 }],
+            segments: Vec::new(),
         };
         let eraser = Stroke {
             tool: DrawTool::Eraser,
@@ -2408,8 +2449,46 @@ mod tests {
             alpha: 255,
             width: 10,
             points: vec![POINT { x: 5, y: 5 }, POINT { x: 5, y: 5 }],
+            segments: Vec::new(),
         };
         let rendered = render_strokes(&base, &[pen, eraser], None);
         assert_eq!(rendered.get_pixel(5, 5), &Rgba([255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn eraser_segments_keep_their_original_width() {
+        let base = RgbaImage::from_pixel(24, 18, Rgba([255, 255, 255, 255]));
+        let pen_left = Stroke {
+            tool: DrawTool::Pen,
+            color: COLORREF(255 | (70 << 8) | (70 << 16)),
+            alpha: 255,
+            width: 3,
+            points: vec![POINT { x: 4, y: 0 }, POINT { x: 4, y: 17 }],
+            segments: Vec::new(),
+        };
+        let pen_right = Stroke {
+            tool: DrawTool::Pen,
+            color: COLORREF(255 | (70 << 8) | (70 << 16)),
+            alpha: 255,
+            width: 3,
+            points: vec![POINT { x: 18, y: 0 }, POINT { x: 18, y: 17 }],
+            segments: Vec::new(),
+        };
+        let eraser = Stroke {
+            tool: DrawTool::Eraser,
+            color: COLORREF(0),
+            alpha: 255,
+            width: 18,
+            points: vec![POINT { x: 18, y: 9 }],
+            segments: vec![EraserSegment {
+                width: 4,
+                points: vec![POINT { x: 4, y: 9 }],
+            }],
+        };
+        let rendered = render_strokes(&base, &[pen_left, pen_right, eraser], None);
+        // The old 4px seg must not grow to the current 18px width.
+        assert_eq!(rendered.get_pixel(4, 3), &Rgba([255, 70, 70, 255]));
+        assert_eq!(rendered.get_pixel(4, 9), &Rgba([255, 255, 255, 255]));
+        assert_eq!(rendered.get_pixel(18, 4), &Rgba([255, 255, 255, 255]));
     }
 }
