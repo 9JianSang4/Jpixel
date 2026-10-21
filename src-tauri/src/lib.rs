@@ -7,7 +7,9 @@ use tauri_plugin_global_shortcut::ShortcutState;
 pub mod capture;
 pub mod clipboard;
 mod config;
+pub mod core;
 pub mod error;
+pub mod overlay;
 mod shortcut;
 mod window;
 
@@ -113,10 +115,10 @@ fn setup_logging() {
 }
 
 fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
+    let capture_item = MenuItem::with_id(app, "capture", "截图", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&settings_item, &quit_item,
-    ])?;
+    let menu = Menu::with_items(app, &[&capture_item, &settings_item, &quit_item])?;
 
     TrayIconBuilder::new()
         .icon(
@@ -134,6 +136,7 @@ fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
         .menu(&menu)
         .on_menu_event(|app: &AppHandle, event| {
             match event.id.as_ref() {
+                "capture" => overlay::trigger_capture(),
                 "settings" => {
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.show();
@@ -155,7 +158,7 @@ fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
 fn setup_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let win_hide = window.clone();
-        let _ = window.on_window_event(move |event| {
+        window.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = win_hide.hide();
@@ -232,20 +235,29 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle();
 
-            let loaded_config = load_config(&app_handle);
-            let hotkey_str = loaded_config.screenshot_hotkey.clone();
+            let loaded_config = load_config(app_handle);
             {
                 let mut cfg = config::lock_or_warn!(config);
                 *cfg = loaded_config;
             }
 
-            if let Err(e) = setup_tray(&app_handle) {
+            if let Err(e) = setup_tray(app_handle) {
                 log::error!("Failed to setup tray: {}", e);
             }
 
-            setup_main_window(&app_handle);
-            shortcut::register_screenshot_hotkey(&app_handle, &hotkey_str);
-            capture::cleanup_temp_pins_on_startup(&app_handle);
+            setup_main_window(app_handle);
+            // P2.1: the native overlay owns the screenshot hotkey. Keep the
+            // legacy registration code for parity work, but do not register it
+            // here or it will steal Alt+X from the overlay thread.
+            capture::cleanup_temp_pins_on_startup(app_handle);
+
+            // P2.1 native path: Alt+X is registered by the overlay thread, not
+            // the Tauri global-shortcut plugin. The legacy path remains until
+            // parity is reached in P2.2.
+            let native_config = core::config::NativeConfig::default();
+            if let Err(e) = overlay::start(&native_config.hotkey) {
+                log::error!("Failed to start native overlay: {e}");
+            }
 
             log::info!("Jpixel setup completed successfully");
             Ok(())

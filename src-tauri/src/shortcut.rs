@@ -139,10 +139,14 @@ pub fn parse_shortcut(s: &str) -> Result<Shortcut, String> {
 }
 
 /// Register the screenshot hotkey, replacing any existing registration.
+///
+/// P2.1 keeps this helper for the legacy path, but the native overlay now owns
+/// the global screenshot hotkey.
+#[allow(dead_code)]
 pub fn register_screenshot_hotkey(app: &AppHandle, hotkey_str: &str) {
     match parse_shortcut(hotkey_str) {
         Ok(shortcut) => {
-            let _ = app.global_shortcut().unregister(shortcut.clone());
+            let _ = app.global_shortcut().unregister(shortcut);
             match app.global_shortcut().register(shortcut) {
                 Ok(()) => log::info!("Registered global shortcut: {}", hotkey_str),
                 Err(e) => log::warn!("Failed to register global shortcut {}: {}", hotkey_str, e),
