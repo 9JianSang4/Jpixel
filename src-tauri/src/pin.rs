@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes,
     SetWindowLongPtrW, SetWindowPos, SetTimer, ShowWindow, CS_DBLCLKS, GWLP_USERDATA,
     HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY,
+    SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOSIZE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY,
     WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
@@ -36,7 +36,7 @@ const PIN_CLASS: PCWSTR = w!("JpixelPin");
 const PIN_BORDER: i32 = 1;
 const MIN_SCALE: f32 = 0.1;
 const MAX_SCALE: f32 = 4.0;
-const SCALE_STEP: f32 = 0.05;
+const SCALE_STEP: f32 = 0.07;
 const OPACITY_STEP: i32 = 26;
 const MIN_OPACITY: i32 = 26;
 const PIN_ANIM_MS: u64 = 150;
@@ -84,8 +84,10 @@ pub fn apply_limit() {
 }
 
 struct PinAnim {
-    from: POINT,
-    to: POINT,
+    from: RECT,
+    to: RECT,
+    from_scale: f32,
+    to_scale: f32,
     start: Instant,
 }
 
@@ -207,6 +209,16 @@ fn anim_progress(start: Instant) -> f32 {
     (start.elapsed().as_millis() as f32 / PIN_ANIM_MS as f32).clamp(0.0, 1.0)
 }
 
+fn visual_scale(state: &PinState) -> f32 {
+    match state.anim.as_ref() {
+        Some(anim) => {
+            let t = ease_out_cubic(anim_progress(anim.start));
+            anim.from_scale + (anim.to_scale - anim.from_scale) * t
+        }
+        None => state.scale,
+    }
+}
+
 unsafe fn apply_opacity(hwnd: HWND, state: &mut PinState, opacity: i32) {
     state.opacity = opacity.clamp(MIN_OPACITY, 255) as u8;
     let _ = SetLayeredWindowAttributes(
@@ -221,16 +233,19 @@ unsafe fn finish_animation(hwnd: HWND, state: &mut PinState) {
     let Some(anim) = state.anim.take() else {
         return;
     };
+    state.scale = anim.to_scale;
     let _ = KillTimer(hwnd, PIN_ANIM_TIMER_ID);
     let _ = SetWindowPos(
         hwnd,
         HWND_TOPMOST,
-        anim.to.x,
-        anim.to.y,
-        0,
-        0,
-        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+        anim.to.left,
+        anim.to.top,
+        anim.to.right - anim.to.left,
+        anim.to.bottom - anim.to.top,
+        SWP_NOACTIVATE | SWP_NOCOPYBITS,
     );
+    let _ = InvalidateRect(hwnd, None, false);
+    let _ = UpdateWindow(hwnd);
 }
 
 unsafe fn resize_pin(hwnd: HWND, state: &mut PinState, scale: f32, anchor: Option<POINT>) {
@@ -238,7 +253,7 @@ unsafe fn resize_pin(hwnd: HWND, state: &mut PinState, scale: f32, anchor: Optio
     if GetWindowRect(hwnd, &mut window).is_err() {
         return;
     }
-    let old_scale = state.scale;
+    let old_scale = visual_scale(state);
     let next_scale = scale.clamp(MIN_SCALE, MAX_SCALE);
     let (new_width, new_height) = scaled_size(state.width, state.height, next_scale);
     let (left, top) = if let Some(cursor) = anchor {
@@ -253,36 +268,30 @@ unsafe fn resize_pin(hwnd: HWND, state: &mut PinState, scale: f32, anchor: Optio
     } else {
         (window.left, window.top)
     };
-
-    // Resize once at the current position, then glide only the window position.
-    // Resizing on every animation frame causes layered-window composition jitter.
-    let _ = SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        window.left,
-        window.top,
-        new_width + PIN_BORDER * 2,
-        new_height + PIN_BORDER * 2,
-        SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOCOPYBITS,
-    );
-    state.scale = next_scale;
-    let _ = InvalidateRect(hwnd, None, false);
-    let _ = UpdateWindow(hwnd);
-
-    let _ = KillTimer(hwnd, PIN_ANIM_TIMER_ID);
-    if left != window.left || top != window.top {
-        state.anim = Some(PinAnim {
-            from: POINT {
-                x: window.left,
-                y: window.top,
-            },
-            to: POINT { x: left, y: top },
-            start: Instant::now(),
-        });
-        let _ = SetTimer(hwnd, PIN_ANIM_TIMER_ID, 16, None);
-    } else {
-        state.anim = None;
+    let target = RECT {
+        left,
+        top,
+        right: left + new_width + PIN_BORDER * 2,
+        bottom: top + new_height + PIN_BORDER * 2,
+    };
+    if target.left == window.left
+        && target.top == window.top
+        && target.right == window.right
+        && target.bottom == window.bottom
+    {
+        state.scale = next_scale;
+        return;
     }
+    state.scale = next_scale;
+    state.anim = Some(PinAnim {
+        from: window,
+        to: target,
+        from_scale: old_scale,
+        to_scale: next_scale,
+        start: Instant::now(),
+    });
+    let _ = SetTimer(hwnd, PIN_ANIM_TIMER_ID, 16, None);
+    let _ = InvalidateRect(hwnd, None, false);
 }
 
 unsafe extern "system" fn pin_wndproc(
@@ -299,20 +308,32 @@ unsafe extern "system" fn pin_wndproc(
                     return LRESULT(0);
                 };
                 let t = ease_out_cubic(anim_progress(anim.start));
-                let left = anim.from.x + ((anim.to.x - anim.from.x) as f32 * t).round() as i32;
-                let top = anim.from.y + ((anim.to.y - anim.from.y) as f32 * t).round() as i32;
+                let rect = RECT {
+                    left: anim.from.left
+                        + ((anim.to.left - anim.from.left) as f32 * t).round() as i32,
+                    top: anim.from.top
+                        + ((anim.to.top - anim.from.top) as f32 * t).round() as i32,
+                    right: anim.from.right
+                        + ((anim.to.right - anim.from.right) as f32 * t).round() as i32,
+                    bottom: anim.from.bottom
+                        + ((anim.to.bottom - anim.from.bottom) as f32 * t).round() as i32,
+                };
                 let done = t >= 1.0;
+                let target_scale = anim.to_scale;
                 let _ = SetWindowPos(
                     hwnd,
                     HWND_TOPMOST,
-                    left,
-                    top,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_NOACTIVATE | SWP_NOCOPYBITS,
                 );
+                let _ = InvalidateRect(hwnd, None, false);
+                let _ = UpdateWindow(hwnd);
                 if done {
                     state.anim = None;
+                    state.scale = target_scale;
                     let _ = KillTimer(hwnd, PIN_ANIM_TIMER_ID);
                 }
             }
