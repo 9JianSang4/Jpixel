@@ -2077,6 +2077,7 @@ dependencies = [
  "imageproc",
  "log",
  "raw-window-handle",
+ "rfd",
  "screenshots",
  "serde",
  "serde_json",

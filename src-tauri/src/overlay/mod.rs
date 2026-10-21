@@ -7,16 +7,22 @@ use self::gdi::Dib;
 use crate::core::monitor::{self, MonitorInfo};
 use anyhow::{anyhow, Result};
 use arboard::{Clipboard, ImageData};
-use image::RgbaImage;
+use image::{ImageFormat, RgbaImage};
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
-use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, UpdateWindow, PAINTSTRUCT};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, GetStockObject,
+    RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, CLEARTYPE_QUALITY,
+    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
+    FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -66,6 +72,37 @@ pub struct CopyStats {
     pub height: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolbarButton {
+    Copy,
+    Save,
+    Pin,
+    Pen,
+    Eraser,
+    Undo,
+    Redo,
+    Close,
+}
+
+const TOOLBAR_ITEMS: [(ToolbarButton, &str); 8] = [
+    (ToolbarButton::Copy, "复制"),
+    (ToolbarButton::Save, "保存"),
+    (ToolbarButton::Pin, "贴图"),
+    (ToolbarButton::Pen, "画笔"),
+    (ToolbarButton::Eraser, "橡皮"),
+    (ToolbarButton::Undo, "撤销"),
+    (ToolbarButton::Redo, "重做"),
+    (ToolbarButton::Close, "关闭"),
+];
+
+const TOOLBAR_BUTTON_W: i32 = 44;
+const TOOLBAR_BUTTON_H: i32 = 34;
+const TOOLBAR_PAD: i32 = 6;
+const TOOLBAR_GAP: i32 = 2;
+const TOOLBAR_OFFSET: i32 = 8;
+const TOOLBAR_W: i32 = 8 * TOOLBAR_BUTTON_W + 7 * TOOLBAR_GAP + 2 * TOOLBAR_PAD;
+const TOOLBAR_H: i32 = TOOLBAR_BUTTON_H + 2 * TOOLBAR_PAD;
+
 struct OverlayState {
     hwnd: HWND,
     back: Option<Dib>,
@@ -86,6 +123,7 @@ struct OverlayState {
     hotkey_name: String,
     capture_ms: f64,
     first_frame_ms: f64,
+    hover_button: Option<ToolbarButton>,
 }
 
 impl OverlayState {
@@ -110,6 +148,7 @@ impl OverlayState {
             hotkey_name: String::new(),
             capture_ms: 0.0,
             first_frame_ms: 0.0,
+            hover_button: None,
         }
     }
 }
@@ -444,6 +483,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.start = None;
         state.end = None;
         state.dragging = false;
+        state.hover_button = None;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -523,6 +563,164 @@ fn selection_rect(state: &OverlayState) -> Option<RECT> {
     }
 }
 
+fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
+    COLORREF(r as u32 | ((g as u32) << 8) | ((b as u32) << 16))
+}
+
+fn toolbar_rect(state: &OverlayState) -> Option<RECT> {
+    if state.dragging {
+        return None;
+    }
+    let image = state.image.as_ref()?;
+    let selection = selection_rect(state)?;
+    let screen_w = image.width() as i32;
+    let screen_h = image.height() as i32;
+    let mut left = selection.right - TOOLBAR_W;
+    left = left.clamp(4, (screen_w - TOOLBAR_W - 4).max(4));
+    let mut top = selection.bottom + TOOLBAR_OFFSET;
+    if top + TOOLBAR_H > screen_h - 4 {
+        top = selection.top - TOOLBAR_H - TOOLBAR_OFFSET;
+    }
+    top = top.clamp(4, (screen_h - TOOLBAR_H - 4).max(4));
+    Some(RECT {
+        left,
+        top,
+        right: left + TOOLBAR_W,
+        bottom: top + TOOLBAR_H,
+    })
+}
+
+fn toolbar_button_rects(state: &OverlayState) -> Vec<(ToolbarButton, RECT)> {
+    let Some(toolbar) = toolbar_rect(state) else {
+        return Vec::new();
+    };
+    TOOLBAR_ITEMS
+        .iter()
+        .enumerate()
+        .map(|(index, (button, _))| {
+            let left = toolbar.left + TOOLBAR_PAD + index as i32 * (TOOLBAR_BUTTON_W + TOOLBAR_GAP);
+            let rect = RECT {
+                left,
+                top: toolbar.top + TOOLBAR_PAD,
+                right: left + TOOLBAR_BUTTON_W,
+                bottom: toolbar.top + TOOLBAR_PAD + TOOLBAR_BUTTON_H,
+            };
+            (*button, rect)
+        })
+        .collect()
+}
+
+fn toolbar_button_at(state: &OverlayState, point: POINT) -> Option<ToolbarButton> {
+    toolbar_button_rects(state)
+        .into_iter()
+        .find(|(_, rect)| {
+            point.x >= rect.left
+                && point.x < rect.right
+                && point.y >= rect.top
+                && point.y < rect.bottom
+        })
+        .map(|(button, _)| button)
+}
+
+fn toolbar_button_enabled(_state: &OverlayState, button: ToolbarButton) -> bool {
+    match button {
+        ToolbarButton::Copy | ToolbarButton::Save | ToolbarButton::Close => true,
+        // P2.2b enables these once annotations are wired.
+        ToolbarButton::Pin
+        | ToolbarButton::Pen
+        | ToolbarButton::Eraser
+        | ToolbarButton::Undo
+        | ToolbarButton::Redo => false,
+    }
+}
+
+fn draw_toolbar(hdc: HDC, state: &OverlayState) -> Result<()> {
+    let Some(toolbar) = toolbar_rect(state) else {
+        return Ok(());
+    };
+    unsafe {
+        let background = CreateSolidBrush(rgb(28, 28, 30));
+        let old_brush = SelectObject(hdc, HGDIOBJ(background.0));
+        let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+        let _ = RoundRect(
+            hdc,
+            toolbar.left,
+            toolbar.top,
+            toolbar.right,
+            toolbar.bottom,
+            12,
+            12,
+        );
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(background.0));
+
+        let font: HFONT = CreateFontW(
+            -12,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            DEFAULT_PITCH.0 as u32,
+            w!("Microsoft YaHei UI"),
+        );
+        let old_font = SelectObject(hdc, HGDIOBJ(font.0));
+        let _ = SetBkMode(hdc, TRANSPARENT);
+
+        for (button, rect) in toolbar_button_rects(state) {
+            let enabled = toolbar_button_enabled(state, button);
+            if enabled && state.hover_button == Some(button) {
+                let hover = CreateSolidBrush(rgb(58, 58, 62));
+                let old = SelectObject(hdc, HGDIOBJ(hover.0));
+                let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+                let _ = RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 8, 8);
+                SelectObject(hdc, old_pen);
+                SelectObject(hdc, old);
+                let _ = DeleteObject(HGDIOBJ(hover.0));
+            }
+            let label = TOOLBAR_ITEMS
+                .iter()
+                .find(|(item, _)| *item == button)
+                .map(|(_, label)| *label)
+                .unwrap_or("");
+            let color = if enabled {
+                rgb(245, 245, 245)
+            } else {
+                rgb(125, 125, 130)
+            };
+            let _ = SetTextColor(hdc, color);
+            let mut text: Vec<u16> = label.encode_utf16().collect();
+            let mut text_rect = rect;
+            let _ = DrawTextW(
+                hdc,
+                &mut text,
+                &mut text_rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+
+        SelectObject(hdc, old_font);
+        let _ = DeleteObject(HGDIOBJ(font.0));
+    }
+    Ok(())
+}
+
+fn handle_toolbar_click(button: ToolbarButton) {
+    match button {
+        ToolbarButton::Copy => copy_and_close(),
+        ToolbarButton::Save => save_and_close(),
+        ToolbarButton::Close => cancel_and_close(),
+        other => log::debug!("toolbar button {:?} is not implemented yet", other),
+    }
+}
+
 pub fn set_bench_selection() -> Result<()> {
     let hwnd = with_state_mut(|state| {
         let (w, h) = state
@@ -548,7 +746,7 @@ pub fn set_bench_selection() -> Result<()> {
     Ok(())
 }
 
-pub fn copy_current_selection() -> Result<CopyStats> {
+fn cropped_selection() -> Result<(RgbaImage, RECT)> {
     let (image, rect) = STATE.with(|cell| {
         let borrow = cell.borrow();
         let state = borrow
@@ -572,6 +770,13 @@ pub fn copy_current_selection() -> Result<CopyStats> {
     let w = (rect.right - rect.left).max(1) as u32;
     let h = (rect.bottom - rect.top).max(1) as u32;
     let crop = image::imageops::crop_imm(&image, x, y, w, h).to_image();
+    Ok((crop, rect))
+}
+
+pub fn copy_current_selection() -> Result<CopyStats> {
+    let (crop, _) = cropped_selection()?;
+    let w = crop.width();
+    let h = crop.height();
 
     let data = ImageData {
         width: w as usize,
@@ -647,6 +852,7 @@ fn hide_overlay_for_recapture() {
         let hwnd = state.hwnd;
         state.visible = false;
         state.dragging = false;
+        state.hover_button = None;
         state.start = None;
         state.end = None;
         state.back = None;
@@ -672,6 +878,7 @@ pub fn hide_overlay() {
         let prev = state.prev_foreground;
         state.visible = false;
         state.dragging = false;
+        state.hover_button = None;
         state.start = None;
         state.end = None;
         state.back = None;
@@ -716,6 +923,63 @@ fn copy_and_close() {
     hide_overlay();
 }
 
+fn default_save_name() -> String {
+    use time::OffsetDateTime;
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    let format = time::format_description::parse("[year][month][day]_[hour][minute][second]")
+        .unwrap_or_default();
+    let stamp = now.format(&format).unwrap_or_else(|_| "screenshot".to_string());
+    format!("Jpixel_{stamp}.png")
+}
+
+fn ensure_png_extension(mut path: PathBuf) -> PathBuf {
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("png"))
+        .unwrap_or(false)
+    {
+        return path;
+    }
+    path.set_extension("png");
+    path
+}
+
+fn save_current_selection() -> Result<Option<PathBuf>> {
+    let (image, _) = cropped_selection()?;
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("PNG 图片", &["png"])
+        .set_file_name(default_save_name());
+
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        let pictures = Path::new(&profile).join("Pictures");
+        if pictures.is_dir() {
+            dialog = dialog.set_directory(pictures);
+        }
+    }
+
+    let Some(path) = dialog.save_file() else {
+        return Ok(None);
+    };
+    let path = ensure_png_extension(path);
+    image
+        .save_with_format(&path, ImageFormat::Png)
+        .map_err(|e| anyhow!("save PNG failed: {e}"))?;
+    Ok(Some(path))
+}
+
+fn save_and_close() {
+    match save_current_selection() {
+        Ok(Some(path)) => {
+            report_current("save", None);
+            log::info!("saved native capture to {}", path.display());
+            hide_overlay();
+        }
+        Ok(None) => log::debug!("native save cancelled"),
+        Err(e) => log::error!("native save failed: {e}"),
+    }
+}
+
 fn cancel_and_close() {
     report_current("cancel", None);
     hide_overlay();
@@ -750,7 +1014,9 @@ fn paint(hwnd: HWND) {
                 (&state.back, &state.dimmed, &state.original)
             {
                 if let Err(e) =
-                    gdi::paint_overlay(hwnd, back, dimmed, original, selection_rect(state))
+                    gdi::paint_overlay(hwnd, back, dimmed, original, selection_rect(state), |hdc| {
+                        draw_toolbar(hdc, state)
+                    })
                 {
                     log::error!("native overlay paint failed: {e}");
                 }
@@ -810,6 +1076,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_ERASEBKGND => LRESULT(1),
         WM_LBUTTONDOWN => {
             let pt = point_from_lparam(lparam);
+            if let Ok(Some(button)) = with_state(|state| toolbar_button_at(state, pt)) {
+                handle_toolbar_click(button);
+                return LRESULT(0);
+            }
             let _ = SetCapture(hwnd);
             clip_cursor_to_window(hwnd);
             with_state_mut(|state| {
@@ -818,6 +1088,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 let clamped = clamp_to_image(state, pt);
                 state.dragging = true;
+                state.hover_button = None;
                 state.start = Some(clamped);
                 state.end = Some(clamped);
                 Ok(())
@@ -831,10 +1102,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let changed = with_state_mut(|state| {
                 if state.dragging {
                     state.end = Some(clamp_to_image(state, pt));
-                    Ok(true)
-                } else {
-                    Ok(false)
+                    return Ok(true);
                 }
+                let hover = toolbar_button_at(state, pt);
+                if state.hover_button == hover {
+                    return Ok(false);
+                }
+                state.hover_button = hover;
+                Ok(true)
             })
             .unwrap_or(false);
             if changed {
@@ -847,6 +1122,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             release_cursor_clip();
             with_state_mut(|state| {
                 state.dragging = false;
+                state.hover_button = None;
+                if let Some(rect) = selection_rect(state) {
+                    if rect.right - rect.left < 3 || rect.bottom - rect.top < 3 {
+                        state.start = None;
+                        state.end = None;
+                    }
+                }
                 Ok(())
             })
             .ok();
@@ -855,6 +1137,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_CAPTURECHANGED => {
             release_cursor_clip();
+            with_state_mut(|state| {
+                state.dragging = false;
+                state.hover_button = None;
+                Ok(())
+            })
+            .ok();
             LRESULT(0)
         }
         WM_KEYDOWN => {
@@ -918,5 +1206,63 @@ mod tests {
             choose_prev_foreground(HWND(0), HWND(0x99), HWND(0x10)).0,
             0x10
         );
+    }
+
+    fn fake_state(w: u32, h: u32, start: POINT, end: POINT) -> OverlayState {
+        let mut state = OverlayState::new(HWND(1));
+        state.image = Some(RgbaImage::new(w, h));
+        state.start = Some(start);
+        state.end = Some(end);
+        state
+    }
+
+    #[test]
+    fn toolbar_flips_above_when_selection_is_near_the_bottom() {
+        let state = fake_state(
+            800,
+            600,
+            POINT { x: 100, y: 100 },
+            POINT { x: 700, y: 550 },
+        );
+        let rect = toolbar_rect(&state).expect("toolbar should exist");
+        assert!(rect.top < 100, "toolbar should flip above the selection");
+        assert!(rect.bottom <= 600);
+        assert!(rect.left >= 0 && rect.right <= 800);
+    }
+
+    #[test]
+    fn toolbar_hit_test_finds_copy_button() {
+        let state = fake_state(
+            800,
+            600,
+            POINT { x: 100, y: 100 },
+            POINT { x: 700, y: 400 },
+        );
+        let buttons = toolbar_button_rects(&state);
+        let (button, rect) = buttons.first().expect("toolbar buttons");
+        assert_eq!(*button, ToolbarButton::Copy);
+        let center = POINT {
+            x: (rect.left + rect.right) / 2,
+            y: (rect.top + rect.bottom) / 2,
+        };
+        assert_eq!(toolbar_button_at(&state, center), Some(ToolbarButton::Copy));
+    }
+
+    #[test]
+    fn png_extension_is_added_or_replaced() {
+        assert_eq!(ensure_png_extension(PathBuf::from("shot")), PathBuf::from("shot.png"));
+        assert_eq!(
+            ensure_png_extension(PathBuf::from("shot.PNG")),
+            PathBuf::from("shot.PNG")
+        );
+        assert_eq!(
+            ensure_png_extension(PathBuf::from("shot.jpg")),
+            PathBuf::from("shot.png")
+        );
+    }
+
+    #[test]
+    fn default_save_name_is_png() {
+        assert!(default_save_name().ends_with(".png"));
     }
 }

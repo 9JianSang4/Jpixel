@@ -150,13 +150,17 @@ impl Drop for Dib {
     }
 }
 
-pub fn paint_overlay(
+pub fn paint_overlay<F>(
     hwnd: HWND,
     back: &Dib,
     dimmed: &Dib,
     original: &Dib,
     selection: Option<RECT>,
-) -> Result<()> {
+    draw_extra: F,
+) -> Result<()>
+where
+    F: FnOnce(HDC) -> Result<()>,
+{
     // Compose into the back buffer first: one BitBlt to the window DC avoids
     // the progressive repaint flicker caused by drawing the dim image, the
     // selection and the border directly to the window.
@@ -170,6 +174,8 @@ pub fn paint_overlay(
             draw_border(back.hdc(), &rect);
         }
     }
+
+    draw_extra(back.hdc())?;
 
     let mut ps = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
