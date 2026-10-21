@@ -375,10 +375,10 @@ const doublePressSpeedOptions = [
 ];
 
 const pinLimitOptions = [
-  { value: "four", label: "4 张" },
-  { value: "eight", label: "8 张" },
-  { value: "sixteen", label: "16 张" },
-  { value: "thirty_two", label: "32 张" },
+  { value: "four", label: "2 张" },
+  { value: "eight", label: "4 张" },
+  { value: "sixteen", label: "6 张" },
+  { value: "thirty_two", label: "8 张" },
 ];
 
 function hotkeyKeys(value: string): string[] {

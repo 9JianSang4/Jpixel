@@ -10,19 +10,19 @@ use std::time::Instant;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, GetStockObject,
-    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
-    CLEARTYPE_QUALITY, DEFAULT_CHARSET, DEFAULT_PITCH, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
-    DT_WORDBREAK, FW_BOLD, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
+    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, GetStockObject, InvalidateRect,
+    RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, CLEARTYPE_QUALITY,
+    DEFAULT_CHARSET, DEFAULT_PITCH, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FW_BOLD,
+    FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics,
-    GetWindowLongPtrW, KillTimer, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
-    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETWORKAREA,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, FindWindowExW, FindWindowW, GetClientRect,
+    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, RegisterClassW,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETWORKAREA,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     SW_SHOWNOACTIVATE, WM_DESTROY, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -33,7 +33,8 @@ const BUBBLE_WIDTH: i32 = 420;
 const BUBBLE_HEIGHT: i32 = 96;
 const BUBBLE_FADE_MS: u128 = 200;
 const BUBBLE_LIFETIME_MS: u128 = 4500;
-const BUBBLE_TIMER_ID: usize = 1;
+const BUBBLE_ANIM_TIMER_ID: usize = 1;
+const BUBBLE_HIDE_TIMER_ID: usize = 2;
 
 static BUBBLE_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -56,7 +57,8 @@ pub fn dismiss() {
     }
 }
 
-pub fn register_class() -> Result<()> {    unsafe {
+pub fn register_class() -> Result<()> {
+    unsafe {
         let module = GetModuleHandleW(None)?;
         let class = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW,
@@ -71,6 +73,18 @@ pub fn register_class() -> Result<()> {    unsafe {
         }
     }
     Ok(())
+}
+
+unsafe fn notification_area() -> Option<RECT> {
+    let tray = FindWindowW(w!("Shell_TrayWnd"), None);
+    if tray.0 == 0 {
+        return None;
+    }
+    let notify = FindWindowExW(tray, None, w!("TrayNotifyWnd"), None);
+    let target = if notify.0 != 0 { notify } else { tray };
+    let mut rect = RECT::default();
+    GetWindowRect(target, &mut rect).ok()?;
+    Some(rect)
 }
 
 pub fn show_pin_limit(limit: usize) {
@@ -103,8 +117,30 @@ pub fn show_pin_limit(limit: usize) {
                 bottom: top + GetSystemMetrics(SM_CYVIRTUALSCREEN),
             };
         }
-        let x = work.right - BUBBLE_WIDTH - 12;
-        let target_y = work.bottom - BUBBLE_HEIGHT - 12;
+        let fallback_x = work.right - BUBBLE_WIDTH - 12;
+        let fallback_y = work.bottom - BUBBLE_HEIGHT - 12;
+        let (x, target_y) = notification_area()
+            .map(|tray| {
+                let center_x = (tray.left + tray.right) / 2;
+                let mut x = center_x - BUBBLE_WIDTH / 2;
+                let mut y = if tray.top >= work.bottom - 4 {
+                    tray.top - BUBBLE_HEIGHT - 8
+                } else {
+                    tray.bottom + 8
+                };
+                if tray.left >= work.right - 4 {
+                    x = tray.left - BUBBLE_WIDTH - 8;
+                    y = (tray.top + tray.bottom) / 2 - BUBBLE_HEIGHT / 2;
+                } else if tray.right <= work.left + 4 {
+                    x = tray.right + 8;
+                    y = (tray.top + tray.bottom) / 2 - BUBBLE_HEIGHT / 2;
+                }
+                (
+                    x.clamp(work.left + 8, (work.right - BUBBLE_WIDTH - 8).max(work.left + 8)),
+                    y.clamp(work.top + 8, (work.bottom - BUBBLE_HEIGHT - 8).max(work.top + 8)),
+                )
+            })
+            .unwrap_or((fallback_x, fallback_y));
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED
                 | WS_EX_TOOLWINDOW
@@ -174,7 +210,7 @@ pub fn show_pin_limit(limit: usize) {
         BUBBLE_HWND.store(hwnd.0, Ordering::SeqCst);
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        let _ = SetTimer(hwnd, BUBBLE_TIMER_ID, 15, None);
+        let _ = SetTimer(hwnd, BUBBLE_ANIM_TIMER_ID, 15, None);
         let _ = UpdateWindow(hwnd);
     }
 }
@@ -198,15 +234,22 @@ unsafe extern "system" fn bubble_wndproc(
         WM_PAINT => {
             let mut paint = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut paint);
+            let memory = CreateCompatibleDC(hdc);
+            let bitmap = CreateCompatibleBitmap(hdc, BUBBLE_WIDTH, BUBBLE_HEIGHT);
+            let old_bitmap = SelectObject(memory, HGDIOBJ(bitmap.0));
             if let Some(state) = bubble_state(hwnd) {
-                paint_bubble(hwnd, hdc, state);
+                paint_bubble(hwnd, memory, state);
             }
+            let _ = BitBlt(hdc, 0, 0, BUBBLE_WIDTH, BUBBLE_HEIGHT, memory, 0, 0, SRCCOPY);
+            SelectObject(memory, old_bitmap);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(memory);
             let _ = EndPaint(hwnd, &paint);
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_TIMER => {
-            if wparam.0 == BUBBLE_TIMER_ID {
+            if wparam.0 == BUBBLE_ANIM_TIMER_ID {
                 if let Some(state) = bubble_state(hwnd) {
                     let elapsed = state.started.elapsed().as_millis();
                     if elapsed >= BUBBLE_LIFETIME_MS {
@@ -217,6 +260,13 @@ unsafe extern "system" fn bubble_wndproc(
                     let eased = 1.0 - (1.0 - progress).powi(3);
                     let y = state.target_y + ((1.0 - eased) * 14.0) as i32;
                     let alpha = (235.0 * eased) as u8;
+                    if progress >= 1.0 {
+                        // Stop the animation timer so the text is not repainted
+                        // continuously (which caused visible flicker).
+                        let _ = KillTimer(hwnd, BUBBLE_ANIM_TIMER_ID);
+                        let remaining = (BUBBLE_LIFETIME_MS - elapsed).max(1000) as u32;
+                        let _ = SetTimer(hwnd, BUBBLE_HIDE_TIMER_ID, remaining, None);
+                    }
                     let _ = SetWindowPos(
                         hwnd,
                         HWND_TOPMOST,
@@ -229,11 +279,14 @@ unsafe extern "system" fn bubble_wndproc(
                     let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
                     let _ = InvalidateRect(hwnd, None, false);
                 }
+            } else if wparam.0 == BUBBLE_HIDE_TIMER_ID {
+                let _ = DestroyWindow(hwnd);
             }
             LRESULT(0)
         }
         WM_DESTROY => {
-            let _ = KillTimer(hwnd, BUBBLE_TIMER_ID);
+            let _ = KillTimer(hwnd, BUBBLE_ANIM_TIMER_ID);
+            let _ = KillTimer(hwnd, BUBBLE_HIDE_TIMER_ID);
             if BUBBLE_HWND.load(Ordering::SeqCst) == hwnd.0 {
                 BUBBLE_HWND.store(0, Ordering::SeqCst);
             }

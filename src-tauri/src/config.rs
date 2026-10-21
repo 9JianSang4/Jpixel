@@ -62,10 +62,12 @@ pub enum PinLimit {
 impl PinLimit {
     pub fn count(self) -> usize {
         match self {
-            PinLimit::Four => 4,
-            PinLimit::Eight => 8,
-            PinLimit::Sixteen => 16,
-            PinLimit::ThirtyTwo => 32,
+            // Variant names are kept stable for existing config files; the
+            // actual limits are intentionally small.
+            PinLimit::Four => 2,
+            PinLimit::Eight => 4,
+            PinLimit::Sixteen => 6,
+            PinLimit::ThirtyTwo => 8,
         }
     }
 }
@@ -578,10 +580,10 @@ mod tests {
 
     #[test]
     fn pin_limit_has_four_levels() {
-        assert_eq!(PinLimit::Four.count(), 4);
-        assert_eq!(PinLimit::Eight.count(), 8);
-        assert_eq!(PinLimit::Sixteen.count(), 16);
-        assert_eq!(PinLimit::ThirtyTwo.count(), 32);
+        assert_eq!(PinLimit::Four.count(), 2);
+        assert_eq!(PinLimit::Eight.count(), 4);
+        assert_eq!(PinLimit::Sixteen.count(), 6);
+        assert_eq!(PinLimit::ThirtyTwo.count(), 8);
     }
 
     #[test]
