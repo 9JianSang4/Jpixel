@@ -293,6 +293,7 @@ struct OverlayState {
     toolbar_freeze: Option<RECT>,
     toolbar_last: Option<RECT>,
     selection_pending_start: Option<POINT>,
+    mouse_up_releasing: bool,
 }
 
 impl OverlayState {
@@ -338,6 +339,7 @@ impl OverlayState {
             toolbar_freeze: None,
             toolbar_last: None,
             selection_pending_start: None,
+            mouse_up_releasing: false,
         }
     }
 }
@@ -737,6 +739,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.toolbar_freeze = None;
         state.toolbar_last = None;
         state.selection_pending_start = None;
+        state.mouse_up_releasing = false;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -2757,6 +2760,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            let _ = with_state_mut(|state| {
+                state.mouse_up_releasing = true;
+                Ok(())
+            });
             let _ = ReleaseCapture();
             release_cursor_clip();
             let pending = with_state(|state| state.selection_pending_start)
@@ -2765,6 +2772,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = with_state_mut(|state| {
                     state.selection_pending_start = None;
                     state.toolbar_freeze = None;
+                    state.mouse_up_releasing = false;
                     Ok(())
                 });
                 gdi::invalidate(hwnd);
@@ -2772,6 +2780,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 return LRESULT(0);
             }
             if finish_stroke() {
+                let _ = with_state_mut(|state| {
+                    state.mouse_up_releasing = false;
+                    Ok(())
+                });
                 gdi::invalidate(hwnd);
                 update_cursor(hwnd);
                 return LRESULT(0);
@@ -2824,11 +2836,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             })
             .unwrap_or(false);
             let _ = was_adjusting;
+            let _ = with_state_mut(|state| {
+                state.mouse_up_releasing = false;
+                Ok(())
+            });
             gdi::invalidate(hwnd);
             update_cursor(hwnd);
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
+            let releasing =
+                with_state(|state| state.mouse_up_releasing).unwrap_or(false);
+            if releasing {
+                return LRESULT(0);
+            }
             release_cursor_clip();
             finish_stroke();
             with_state_mut(|state| {
