@@ -23,9 +23,9 @@ use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POI
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
-    FillRect, FrameRect, GetStockObject, RoundRect, ScreenToClient, SelectObject, SetBkMode,
-    SetTextColor, UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN,
+    FillRect, GetStockObject, RoundRect, ScreenToClient, SelectObject, SetBkMode, SetTextColor,
+    UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
+    DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -821,6 +821,43 @@ fn pen_rgb(state: &OverlayState) -> (u8, u8, u8) {
     PEN_PALETTE[state.pen_color_index.min(PEN_PALETTE.len() - 1)]
 }
 
+fn fill_frame(hdc: HDC, rect: RECT, thickness: i32, color: COLORREF) {
+    let t = thickness.max(1);
+    let pieces = [
+        RECT {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.top + t,
+        },
+        RECT {
+            left: rect.left,
+            top: rect.bottom - t,
+            right: rect.right,
+            bottom: rect.bottom,
+        },
+        RECT {
+            left: rect.left,
+            top: rect.top + t,
+            right: rect.left + t,
+            bottom: rect.bottom - t,
+        },
+        RECT {
+            left: rect.right - t,
+            top: rect.top + t,
+            right: rect.right,
+            bottom: rect.bottom - t,
+        },
+    ];
+    unsafe {
+        let brush = CreateSolidBrush(color);
+        for piece in pieces {
+            let _ = FillRect(hdc, &piece, brush);
+        }
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+    }
+}
+
 fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
     if state.hover_button != Some(ToolbarButton::Pen) {
         return;
@@ -898,16 +935,21 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
         let _ = FillRect(hdc, &fill, fill_brush);
         let _ = DeleteObject(HGDIOBJ(fill_brush.0));
 
-        // Frame last: a clean 1px border on every side.
+        // Frame last: explicit 1px pieces keep all four edges identical.
         let frame = RECT {
             left,
             top,
             right: left + size,
             bottom: top + size,
         };
-        let border = CreateSolidBrush(rgb(255, 255, 255));
-        let _ = FrameRect(hdc, &frame, border);
-        let _ = DeleteObject(HGDIOBJ(border.0));
+        let outer = RECT {
+            left: left - 1,
+            top: top - 1,
+            right: left + size + 1,
+            bottom: top + size + 1,
+        };
+        fill_frame(hdc, outer, 1, rgb(18, 18, 20));
+        fill_frame(hdc, frame, 1, rgb(255, 255, 255));
     }
 }
 
