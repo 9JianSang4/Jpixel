@@ -22,11 +22,11 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
+    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, EndPaint,
     FillRect, GetStockObject, RoundRect, ScreenToClient, SelectObject, SetBkMode, SetTextColor,
     UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
+    DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_BRUSH, NULL_PEN,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -192,6 +192,9 @@ const PEN_PALETTE: [(u8, u8, u8); 9] = [
 ];
 const PEN_WIDTH: i32 = 3;
 const ERASER_WIDTH: i32 = 20;
+const ERASER_MIN_WIDTH: i32 = 6;
+const ERASER_MAX_WIDTH: i32 = 160;
+const ERASER_WHEEL_STEP: i32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolbarButton {
@@ -253,6 +256,7 @@ struct OverlayState {
     active_stroke: Option<Stroke>,
     pen_color_index: usize,
     pen_alpha: u8,
+    eraser_width: i32,
 }
 
 impl OverlayState {
@@ -288,6 +292,7 @@ impl OverlayState {
             active_stroke: None,
             pen_color_index: 0,
             pen_alpha: 255,
+            eraser_width: ERASER_WIDTH,
         }
     }
 }
@@ -1249,6 +1254,49 @@ fn draw_handles(hdc: HDC, state: &OverlayState) -> Result<()> {
     Ok(())
 }
 
+fn draw_eraser_cursor(hdc: HDC, state: &OverlayState) -> Result<()> {
+    let Some(stroke) = state.active_stroke.as_ref() else {
+        return Ok(());
+    };
+    if stroke.tool != DrawTool::Eraser {
+        return Ok(());
+    }
+    let Some(cursor) = state.cursor else {
+        return Ok(());
+    };
+    let radius = (state.eraser_width / 2).max(1);
+    unsafe {
+        let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+        let outer = CreatePen(PS_SOLID, 3, rgb(10, 10, 12));
+        let old_pen = SelectObject(hdc, HGDIOBJ(outer.0));
+        let _ = Ellipse(
+            hdc,
+            cursor.x - radius,
+            cursor.y - radius,
+            cursor.x + radius,
+            cursor.y + radius,
+        );
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(HGDIOBJ(outer.0));
+
+        let inner = CreatePen(PS_SOLID, 1, rgb(255, 255, 255));
+        let old_pen = SelectObject(hdc, HGDIOBJ(inner.0));
+        let _ = Ellipse(
+            hdc,
+            cursor.x - radius,
+            cursor.y - radius,
+            cursor.x + radius,
+            cursor.y + radius,
+        );
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(HGDIOBJ(inner.0));
+
+        SelectObject(hdc, old_brush);
+    }
+    Ok(())
+}
+
 fn clamp_to_selection(state: &OverlayState, point: POINT) -> Option<POINT> {
     let selection = selection_rect(state)?;
     Some(POINT {
@@ -1295,7 +1343,7 @@ fn begin_stroke(hwnd: HWND, point: POINT, tool: DrawTool) -> bool {
                     PEN_WIDTH,
                 )
             }
-            DrawTool::Eraser => (COLORREF(0), 255, ERASER_WIDTH),
+            DrawTool::Eraser => (COLORREF(0), 255, state.eraser_width),
         };
         state.active_stroke = Some(Stroke {
             tool,
@@ -1895,6 +1943,7 @@ fn paint(hwnd: HWND) {
                     gdi::paint_overlay(hwnd, back, dimmed, original, selection_rect(state), |hdc| {
                         draw_crosshair(back, state)?;
                         draw_handles(hdc, state)?;
+                        draw_eraser_cursor(hdc, state)?;
                         draw_toolbar(hdc, back, state)
                     })
                 {
@@ -2034,7 +2083,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_RBUTTONDOWN => {
             let pt = point_from_lparam(lparam);
+            let _ = with_state_mut(|state| {
+                state.cursor = Some(pt);
+                state.hover_button = None;
+                Ok(())
+            });
             let _ = begin_stroke(hwnd, pt, DrawTool::Eraser);
+            gdi::invalidate(hwnd);
             LRESULT(0)
         }
         WM_RBUTTONUP => {
@@ -2053,6 +2108,27 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 y: ((lparam.0 >> 16) & 0xffff) as u16 as i16 as i32,
             };
             let _ = unsafe { ScreenToClient(hwnd, &mut point) };
+            let erasing = with_state(|state| {
+                state
+                    .active_stroke
+                    .as_ref()
+                    .is_some_and(|stroke| stroke.tool == DrawTool::Eraser)
+            })
+            .unwrap_or(false);
+            if erasing && delta != 0 {
+                let _ = with_state_mut(|state| {
+                    let next = (state.eraser_width + delta * ERASER_WHEEL_STEP)
+                        .clamp(ERASER_MIN_WIDTH, ERASER_MAX_WIDTH);
+                    state.eraser_width = next;
+                    if let Some(stroke) = state.active_stroke.as_mut() {
+                        stroke.width = next;
+                    }
+                    let _ = refresh_annotated(state);
+                    Ok(())
+                });
+                gdi::invalidate(hwnd);
+                return LRESULT(0);
+            }
             let over_pen =
                 with_state(|state| toolbar_button_at(state, point) == Some(ToolbarButton::Pen))
                     .unwrap_or(false);
