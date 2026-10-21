@@ -22,11 +22,11 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    AlphaBlend, BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
-    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint,
+    AlphaBlend, BeginPaint, CreateFontW, CreatePen,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, EndPaint,
     FillRect, GetStockObject, RestoreDC, RoundRect, SaveDC, ScreenToClient, SelectClipRgn,
-    SelectObject, SetBkMode, SetTextColor, SetViewportOrgEx, UpdateWindow, AC_SRC_OVER,
-    BLENDFUNCTION,
+    SelectObject, SetBkMode, SetTextColor, SetViewportOrgEx, UpdateWindow, AC_SRC_ALPHA,
+    AC_SRC_OVER, BLENDFUNCTION,
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER,
     DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_BRUSH, NULL_PEN,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
@@ -293,6 +293,7 @@ struct OverlayState {
     toolbar_motion: Option<ToolbarMotion>,
     toolbar_has_appeared: bool,
     toolbar_freeze: Option<RECT>,
+    toolbar_last: Option<RECT>,
 }
 
 impl OverlayState {
@@ -336,6 +337,7 @@ impl OverlayState {
             toolbar_motion: None,
             toolbar_has_appeared: false,
             toolbar_freeze: None,
+            toolbar_last: None,
         }
     }
 }
@@ -733,6 +735,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.toolbar_motion = None;
         state.toolbar_has_appeared = false;
         state.toolbar_freeze = None;
+        state.toolbar_last = None;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -879,6 +882,7 @@ fn sync_toolbar_motion(state: &mut OverlayState) {
         x: target.left,
         y: target.top,
     };
+    state.toolbar_last = Some(target);
     let now = Instant::now();
     if !state.toolbar_has_appeared {
         state.toolbar_has_appeared = true;
@@ -1097,33 +1101,36 @@ fn draw_toolbar_faded(hdc: HDC, back: &Dib, state: &OverlayState) -> Result<()> 
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
     unsafe {
-        let memory = CreateCompatibleDC(hdc);
-        let bitmap = CreateCompatibleBitmap(hdc, width, height);
-        let old = SelectObject(memory, HGDIOBJ(bitmap.0));
-        let _ = SetViewportOrgEx(memory, -rect.left, -rect.top, None);
-        draw_toolbar(memory, back, state)?;
+        // A real 32-bit DIB is more reliable for AlphaBlend than a compatible
+        // DDB, which can be created without a usable alpha layout.
+        let mut source = Dib::blank(width, height)?;
+        let _ = SetViewportOrgEx(source.hdc(), -rect.left, -rect.top, None);
+        draw_toolbar(source.hdc(), back, state)?;
+        source.make_opaque();
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
             SourceConstantAlpha: 110,
-            AlphaFormat: 0,
+            AlphaFormat: AC_SRC_ALPHA as u8,
         };
-        let _ = AlphaBlend(
+        let blended = AlphaBlend(
             hdc,
             rect.left,
             rect.top,
             width,
             height,
-            memory,
+            source.hdc(),
             0,
             0,
             width,
             height,
             blend,
         );
-        SelectObject(memory, old);
-        let _ = DeleteObject(HGDIOBJ(bitmap.0));
-        let _ = DeleteDC(memory);
+        if !blended.as_bool() {
+            // Never make the old toolbar disappear just because blending
+            // failed: fall back to drawing it normally while reselecting.
+            draw_toolbar(hdc, back, state)?;
+        }
     }
     Ok(())
 }
@@ -2084,6 +2091,7 @@ pub fn hide_overlay() {
         state.toolbar_motion = None;
         state.toolbar_has_appeared = false;
         state.toolbar_freeze = None;
+        state.toolbar_last = None;
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
@@ -2496,7 +2504,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             } else if begin_stroke(hwnd, pt, DrawTool::Pen) {
                 return LRESULT(0);
             }
-            let frozen_toolbar = with_state(toolbar_rect).ok().flatten();
+            let frozen_toolbar = with_state(|state| {
+                toolbar_rect(state).or(state.toolbar_last)
+            })
+            .ok()
+            .flatten();
             let _ = SetCapture(hwnd);
             clip_cursor_to_window(hwnd);
             with_state_mut(|state| {
