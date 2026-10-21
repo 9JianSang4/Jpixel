@@ -22,11 +22,11 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
-    FillRect, GetStockObject, RoundRect, ScreenToClient, SelectObject, SetBkMode, SetTextColor,
-    UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
+    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
+    FillRect, FrameRect, GetStockObject, RoundRect, ScreenToClient, SelectObject, SetBkMode,
+    SetTextColor, UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -852,9 +852,9 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
         let _ = DeleteObject(HGDIOBJ(backdrop.0));
 
         // Checkerboard so low-opacity colors (especially white) are visible.
-        let light = CreateSolidBrush(rgb(220, 220, 222));
-        let dark = CreateSolidBrush(rgb(150, 150, 154));
-        let cell = 5;
+        let light = CreateSolidBrush(rgb(236, 236, 238));
+        let dark = CreateSolidBrush(rgb(118, 118, 124));
+        let cell = 6;
         for row in 0..((size + cell - 1) / cell) {
             for col in 0..((size + cell - 1) / cell) {
                 let rect = RECT {
@@ -875,12 +875,15 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
             back.blend_hline(y, left, left + size, (r, g, b), state.pen_alpha);
         }
 
-        let border = CreatePen(PS_SOLID, 1, rgb(255, 255, 255));
-        let old_pen = SelectObject(hdc, HGDIOBJ(border.0));
-        let old_brush = SelectObject(hdc, GetStockObject(NULL_PEN));
-        let _ = RoundRect(hdc, left, top, left + size, top + size, 6, 6);
-        SelectObject(hdc, old_brush);
-        SelectObject(hdc, old_pen);
+        // Frame only: never fill the preview with the border brush.
+        let frame = RECT {
+            left,
+            top,
+            right: left + size,
+            bottom: top + size,
+        };
+        let border = CreateSolidBrush(rgb(255, 255, 255));
+        let _ = FrameRect(hdc, &frame, border);
         let _ = DeleteObject(HGDIOBJ(border.0));
 
         let alpha_width = ((size - 4) as u32 * state.pen_alpha as u32 / 255) as i32;
