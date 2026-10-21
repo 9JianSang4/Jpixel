@@ -9,26 +9,29 @@ use anyhow::{anyhow, Result};
 use image::RgbaImage;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
-    DeleteObject, EndPaint, FillRect, FrameRect, HGDIOBJ, HALFTONE, InvalidateRect, PAINTSTRUCT,
-    SRCCOPY, SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchBlt, UpdateWindow,
+    BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
+    DeleteObject, EndPaint, FillRect, FrameRect, GetDC, HGDIOBJ, HALFTONE, PAINTSTRUCT, ReleaseDC,
+    SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchBlt, AC_SRC_OVER, BLENDFUNCTION,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetSystemMetrics,
-    GetWindowLongPtrW, GetWindowRect, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, SetTimer, ShowWindow, CS_DBLCLKS, GWLP_USERDATA,
-    HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
-    WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetSystemMetrics,
+    GetWindowLongPtrW, GetWindowRect, LoadCursorW, RegisterClassW, SetWindowLongPtrW, SetWindowPos,
+    SetTimer, ShowWindow, UpdateLayeredWindow, CS_DBLCLKS, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW,
+    KillTimer, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOW, ULW_ALPHA, WM_CAPTURECHANGED, WM_DESTROY,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 const PIN_CLASS: PCWSTR = w!("JpixelPin");
@@ -36,7 +39,7 @@ const PIN_BORDER: i32 = 1;
 const MIN_SCALE: f32 = 0.1;
 const MAX_SCALE: f32 = 4.0;
 const SCALE_STEP: f32 = 0.1;
-const ZOOM_STEP: f32 = 0.005;
+const ZOOM_MS: u64 = 140;
 const ZOOM_TIMER_ID: usize = 0x62;
 const OPACITY_STEP: i32 = 26;
 const MIN_OPACITY: i32 = 26;
@@ -88,7 +91,11 @@ struct PinState {
     height: i32,
     scale: f32,
     target_scale: f32,
-    zoom_anchor: Option<POINT>,
+    zoom_from_scale: f32,
+    zoom_from_left: i32,
+    zoom_from_top: i32,
+    zoom_source: Option<(f32, f32)>,
+    zoom_start: Instant,
     opacity: u8,
     dragging: bool,
     drag_cursor: POINT,
@@ -154,23 +161,26 @@ pub fn create(image: RgbaImage, x: i32, y: i32) -> Result<()> {
         if hwnd.0 == 0 {
             return Err(anyhow!("CreateWindowExW(JpixelPin) failed"));
         }
-        let state = Box::new(PinState {
+        let mut state = Box::new(PinState {
             image: dib,
             width,
             height,
             scale: 1.0,
             target_scale: 1.0,
-            zoom_anchor: None,
+            zoom_from_scale: 1.0,
+            zoom_from_left: 0,
+            zoom_from_top: 0,
+            zoom_source: None,
+            zoom_start: Instant::now(),
             opacity: 255,
             dragging: false,
             drag_cursor: POINT::default(),
             drag_window: POINT::default(),
         });
+        render_pin(hwnd, &mut state, x, y, window_width, window_height);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
-        let _ = SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA);
         PINS.with(|pins| pins.borrow_mut().push(hwnd));
         ShowWindow(hwnd, SW_SHOW);
-        windows::Win32::Graphics::Gdi::UpdateWindow(hwnd);
         apply_limit();
     }
     Ok(())
@@ -193,48 +203,161 @@ fn scaled_size(width: i32, height: i32, scale: f32) -> (i32, i32) {
     )
 }
 
-unsafe fn apply_opacity(hwnd: HWND, state: &mut PinState, opacity: i32) {
-    state.opacity = opacity.clamp(MIN_OPACITY, 255) as u8;
-    let _ = SetLayeredWindowAttributes(
-        hwnd,
-        windows::Win32::Foundation::COLORREF(0),
-        state.opacity,
-        LWA_ALPHA,
-    );
+fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
 }
 
-unsafe fn resize_pin(hwnd: HWND, state: &mut PinState, scale: f32, anchor: Option<POINT>) {
+/// Atomically submit position, size and pixels. This is the key difference from
+/// SetWindowPos + WM_PAINT: the compositor never sees a half-resized frame.
+unsafe fn render_pin(
+    hwnd: HWND,
+    state: &mut PinState,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+) {
+    let width = width.max(PIN_BORDER * 2 + 1);
+    let height = height.max(PIN_BORDER * 2 + 1);
+    let screen = GetDC(HWND(0));
+    let memory = CreateCompatibleDC(screen);
+    let bitmap = CreateCompatibleBitmap(screen, width, height);
+    let old = SelectObject(memory, HGDIOBJ(bitmap.0));
+
+    let client = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
+    let background = CreateSolidBrush(rgb(24, 24, 27));
+    let _ = FillRect(memory, &client, background);
+    let _ = DeleteObject(HGDIOBJ(background.0));
+
+    let draw_width = (width - PIN_BORDER * 2).max(1);
+    let draw_height = (height - PIN_BORDER * 2).max(1);
+    let _ = SetStretchBltMode(memory, HALFTONE);
+    let _ = SetBrushOrgEx(memory, 0, 0, None);
+    let _ = StretchBlt(
+        memory,
+        PIN_BORDER,
+        PIN_BORDER,
+        draw_width,
+        draw_height,
+        state.image.hdc(),
+        0,
+        0,
+        state.width,
+        state.height,
+        windows::Win32::Graphics::Gdi::SRCCOPY,
+    );
+    let border = CreateSolidBrush(rgb(120, 120, 126));
+    let _ = FrameRect(memory, &client, border);
+    let _ = DeleteObject(HGDIOBJ(border.0));
+
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: state.opacity,
+        AlphaFormat: 0,
+    };
+    let dst = POINT { x: left, y: top };
+    let size = SIZE {
+        cx: width,
+        cy: height,
+    };
+    let src = POINT { x: 0, y: 0 };
+    let _ = UpdateLayeredWindow(
+        hwnd,
+        screen,
+        Some(&dst),
+        Some(&size),
+        memory,
+        Some(&src),
+        COLORREF(0),
+        Some(&blend),
+        ULW_ALPHA,
+    );
+
+    let _ = SelectObject(memory, old);
+    let _ = DeleteObject(HGDIOBJ(bitmap.0));
+    let _ = DeleteDC(memory);
+    let _ = ReleaseDC(HWND(0), screen);
+}
+
+unsafe fn apply_opacity(hwnd: HWND, state: &mut PinState, opacity: i32) {
+    state.opacity = opacity.clamp(MIN_OPACITY, 255) as u8;
+    let mut window = RECT::default();
+    if GetWindowRect(hwnd, &mut window).is_ok() {
+        render_pin(
+            hwnd,
+            state,
+            window.left,
+            window.top,
+            window.right - window.left,
+            window.bottom - window.top,
+        );
+    }
+}
+
+unsafe fn start_zoom(hwnd: HWND, state: &mut PinState, target: f32, anchor: Option<POINT>) {
     let mut window = RECT::default();
     if GetWindowRect(hwnd, &mut window).is_err() {
         return;
     }
-    let old_scale = state.scale;
-    let (new_width, new_height) = scaled_size(state.width, state.height, scale);
-    let next_scale = scale.clamp(MIN_SCALE, MAX_SCALE);
-    let (left, top) = if let Some(cursor) = anchor {
-        let source_x = ((cursor.x - window.left - PIN_BORDER) as f32 / old_scale)
-            .clamp(0.0, state.width as f32);
-        let source_y = ((cursor.y - window.top - PIN_BORDER) as f32 / old_scale)
-            .clamp(0.0, state.height as f32);
-        (
-            cursor.x - PIN_BORDER - (source_x * scale.clamp(MIN_SCALE, MAX_SCALE)).round() as i32,
-            cursor.y - PIN_BORDER - (source_y * scale.clamp(MIN_SCALE, MAX_SCALE)).round() as i32,
-        )
+    state.target_scale = target.clamp(MIN_SCALE, MAX_SCALE);
+    state.zoom_from_scale = state.scale;
+    state.zoom_from_left = window.left;
+    state.zoom_from_top = window.top;
+    state.zoom_start = Instant::now();
+    state.zoom_source = anchor.and_then(|cursor| {
+        if state.scale <= 0.0 {
+            return None;
+        }
+        Some((
+            ((cursor.x - window.left - PIN_BORDER) as f32 / state.scale)
+                .clamp(0.0, state.width as f32),
+            ((cursor.y - window.top - PIN_BORDER) as f32 / state.scale)
+                .clamp(0.0, state.height as f32),
+        ))
+    });
+    let _ = SetTimer(hwnd, ZOOM_TIMER_ID, 16, None);
+}
+
+unsafe fn zoom_frame(hwnd: HWND, state: &mut PinState) {
+    let t = (state.zoom_start.elapsed().as_millis() as f32 / ZOOM_MS as f32).clamp(0.0, 1.0);
+    let eased = ease_out_cubic(t);
+    let next = if t >= 1.0 {
+        state.target_scale
     } else {
-        (window.left, window.top)
+        state.zoom_from_scale
+            + (state.target_scale - state.zoom_from_scale) * eased
     };
-    state.scale = next_scale;
-    let _ = SetWindowPos(
+    let (new_width, new_height) = scaled_size(state.width, state.height, next);
+    let (left, top) = match state.zoom_source {
+        Some((source_x, source_y)) => (
+            state.zoom_from_left
+                + (source_x * (state.zoom_from_scale - next)).round() as i32,
+            state.zoom_from_top
+                + (source_y * (state.zoom_from_scale - next)).round() as i32,
+        ),
+        None => (state.zoom_from_left, state.zoom_from_top),
+    };
+    state.scale = next;
+    render_pin(
         hwnd,
-        HWND_TOPMOST,
+        state,
         left,
         top,
         new_width + PIN_BORDER * 2,
         new_height + PIN_BORDER * 2,
-        SWP_NOACTIVATE | SWP_NOZORDER,
     );
-    let _ = InvalidateRect(hwnd, None, false);
-    let _ = UpdateWindow(hwnd);
+    if t >= 1.0 {
+        state.scale = state.target_scale;
+        state.zoom_source = None;
+        let _ = KillTimer(hwnd, ZOOM_TIMER_ID);
+    }
 }
 
 unsafe extern "system" fn pin_wndproc(
@@ -246,65 +369,13 @@ unsafe extern "system" fn pin_wndproc(
     match message {
         WM_TIMER if wparam.0 == ZOOM_TIMER_ID => {
             if let Some(state) = pin_state(hwnd) {
-                let target = state.target_scale;
-                let current = state.scale;
-                let remaining = target - current;
-                let done = remaining.abs() <= ZOOM_STEP;
-                let next = if done {
-                    target
-                } else if remaining > 0.0 {
-                    current + ZOOM_STEP
-                } else {
-                    current - ZOOM_STEP
-                };
-                let anchor = state.zoom_anchor;
-                resize_pin(hwnd, state, next, anchor);
-                if done {
-                    state.zoom_anchor = None;
-                    let _ = KillTimer(hwnd, ZOOM_TIMER_ID);
-                }
+                zoom_frame(hwnd, state);
             }
             LRESULT(0)
         }
         WM_PAINT => {
             let mut paint = PAINTSTRUCT::default();
-            let hdc = BeginPaint(hwnd, &mut paint);
-            if let Some(state) = pin_state(hwnd) {
-                let mut client = RECT::default();
-                let _ = GetClientRect(hwnd, &mut client);
-                let width = (client.right - client.left).max(1);
-                let height = (client.bottom - client.top).max(1);
-                let memory = CreateCompatibleDC(hdc);
-                let bitmap = CreateCompatibleBitmap(hdc, width, height);
-                let old = SelectObject(memory, HGDIOBJ(bitmap.0));
-                let background = CreateSolidBrush(rgb(24, 24, 27));
-                let _ = FillRect(memory, &client, background);
-                let _ = DeleteObject(HGDIOBJ(background.0));
-                let draw_width = (width - PIN_BORDER * 2).max(1);
-                let draw_height = (height - PIN_BORDER * 2).max(1);
-                let _ = SetStretchBltMode(memory, HALFTONE);
-                let _ = SetBrushOrgEx(memory, 0, 0, None);
-                let _ = StretchBlt(
-                    memory,
-                    PIN_BORDER,
-                    PIN_BORDER,
-                    draw_width,
-                    draw_height,
-                    state.image.hdc(),
-                    0,
-                    0,
-                    state.width,
-                    state.height,
-                    SRCCOPY,
-                );
-                let border = CreateSolidBrush(rgb(120, 120, 126));
-                let _ = FrameRect(memory, &client, border);
-                let _ = DeleteObject(HGDIOBJ(border.0));
-                let _ = BitBlt(hdc, 0, 0, width, height, memory, 0, 0, SRCCOPY);
-                let _ = SelectObject(memory, old);
-                let _ = DeleteObject(HGDIOBJ(bitmap.0));
-                let _ = DeleteDC(memory);
-            }
+            let _ = BeginPaint(hwnd, &mut paint);
             let _ = EndPaint(hwnd, &paint);
             LRESULT(0)
         }
@@ -312,7 +383,7 @@ unsafe extern "system" fn pin_wndproc(
         WM_LBUTTONDOWN => {
             if let Some(state) = pin_state(hwnd) {
                 state.target_scale = state.scale;
-                state.zoom_anchor = None;
+                state.zoom_source = None;
                 let _ = KillTimer(hwnd, ZOOM_TIMER_ID);
                 SetFocus(hwnd);
                 SetCapture(hwnd);
@@ -375,12 +446,13 @@ unsafe extern "system" fn pin_wndproc(
                     let target = (state.target_scale + delta as f32 * SCALE_STEP)
                         .clamp(MIN_SCALE, MAX_SCALE);
                     if (target - state.target_scale).abs() > f32::EPSILON {
-                        state.target_scale = target;
                         let mut cursor = POINT::default();
-                        if GetCursorPos(&mut cursor).is_ok() {
-                            state.zoom_anchor = Some(cursor);
-                        }
-                        let _ = SetTimer(hwnd, ZOOM_TIMER_ID, 16, None);
+                        let anchor = if GetCursorPos(&mut cursor).is_ok() {
+                            Some(cursor)
+                        } else {
+                            None
+                        };
+                        start_zoom(hwnd, state, target, anchor);
                     }
                 }
             }
@@ -389,11 +461,12 @@ unsafe extern "system" fn pin_wndproc(
         WM_MBUTTONDOWN => {
             if let Some(state) = pin_state(hwnd) {
                 apply_opacity(hwnd, state, 255);
-                state.target_scale = 1.0;
-                state.zoom_anchor = None;
                 let _ = KillTimer(hwnd, ZOOM_TIMER_ID);
                 if (state.scale - 1.0).abs() > f32::EPSILON {
-                    resize_pin(hwnd, state, 1.0, None);
+                    start_zoom(hwnd, state, 1.0, None);
+                } else {
+                    state.target_scale = 1.0;
+                    state.zoom_source = None;
                 }
             }
             LRESULT(0)
@@ -449,5 +522,59 @@ mod tests {
         assert_eq!(scaled_size(400, 200, 0.0), (40, 20));
         assert_eq!(scaled_size(400, 200, 99.0), (1600, 800));
         assert_eq!(scaled_size(1, 1, MIN_SCALE), (1, 1));
+    }
+
+    #[test]
+    fn layered_window_accepts_constant_alpha_bitmap() {
+        unsafe {
+            let module = GetModuleHandleW(None).expect("module");
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                8,
+                8,
+                None,
+                None,
+                HINSTANCE(module.0),
+                None,
+            );
+            assert!(hwnd.0 != 0, "CreateWindowExW failed");
+
+            let screen = GetDC(HWND(0));
+            let memory = CreateCompatibleDC(screen);
+            let bitmap = CreateCompatibleBitmap(screen, 8, 8);
+            let old = SelectObject(memory, HGDIOBJ(bitmap.0));
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: 255,
+                AlphaFormat: 0,
+            };
+            let dst = POINT { x: 0, y: 0 };
+            let size = SIZE { cx: 8, cy: 8 };
+            let src = POINT { x: 0, y: 0 };
+            let result = UpdateLayeredWindow(
+                hwnd,
+                screen,
+                Some(&dst),
+                Some(&size),
+                memory,
+                Some(&src),
+                COLORREF(0),
+                Some(&blend),
+                ULW_ALPHA,
+            );
+            assert!(result.is_ok(), "UpdateLayeredWindow failed: {result:?}");
+
+            let _ = SelectObject(memory, old);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(memory);
+            let _ = ReleaseDC(HWND(0), screen);
+            let _ = DestroyWindow(hwnd);
+        }
     }
 }
