@@ -177,6 +177,16 @@ export async function setAutoLaunch(enabled: boolean): Promise<void> {
 
 export type SelectionMode = "reselect" | "resize";
 
+export type DoublePressSpeed = "slow" | "normal" | "fast";
+
+export async function getDoublePressSpeed(): Promise<DoublePressSpeed> {
+  return invoke("get_double_press_speed");
+}
+
+export async function setDoublePressSpeed(speed: DoublePressSpeed): Promise<void> {
+  return invoke("set_double_press_speed", { value: speed });
+}
+
 export async function getCrosshairGuides(): Promise<boolean> {
   return invoke("get_crosshair_guides");
 }

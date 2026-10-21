@@ -34,6 +34,8 @@ pub struct AppConfig {
     pub crosshair_guides: bool,
     #[serde(default)]
     pub selection_mode: SelectionMode,
+    #[serde(default)]
+    pub double_press_speed: DoublePressSpeed,
 }
 
 fn default_crosshair_guides() -> bool {
@@ -76,6 +78,30 @@ impl Default for SelectionMode {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DoublePressSpeed {
+    Slow,
+    Normal,
+    Fast,
+}
+
+impl DoublePressSpeed {
+    pub fn window_ms(self) -> u64 {
+        match self {
+            DoublePressSpeed::Slow => 700,
+            DoublePressSpeed::Normal => 500,
+            DoublePressSpeed::Fast => 300,
+        }
+    }
+}
+
+impl Default for DoublePressSpeed {
+    fn default() -> Self {
+        DoublePressSpeed::Normal
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -88,6 +114,7 @@ impl Default for AppConfig {
             default_action: DefaultAction::SaveAndEdit,
             crosshair_guides: true,
             selection_mode: SelectionMode::Reselect,
+            double_press_speed: DoublePressSpeed::Normal,
         }
     }
 }
@@ -215,7 +242,25 @@ macro_rules! config_setter {
 }
 
 config_getter!(get_double_press_enabled, double_press_enabled, bool);
-config_setter!(set_double_press_enabled, double_press_enabled, bool);
+
+#[tauri::command]
+pub fn set_double_press_enabled(
+    app: AppHandle,
+    config: State<ConfigArc>,
+    value: bool,
+) -> Result<(), JpixelError> {
+    let mut cfg = lock_or_warn!(config);
+    cfg.double_press_enabled = value;
+    let clone = cfg.clone();
+    drop(cfg);
+    crate::overlay::set_options(
+        clone.crosshair_guides,
+        clone.selection_mode,
+        clone.double_press_enabled,
+        clone.double_press_speed.window_ms(),
+    );
+    save_config(&app, &clone)
+}
 
 config_getter!(get_screenshot_hotkey, screenshot_hotkey, String);
 config_getter!(get_copy_hotkey, copy_hotkey, String);
@@ -228,6 +273,26 @@ config_setter!(set_default_action, default_action, DefaultAction);
 config_getter!(get_auto_launch, auto_launch, bool);
 config_getter!(get_crosshair_guides, crosshair_guides, bool);
 config_getter!(get_selection_mode, selection_mode, SelectionMode);
+config_getter!(get_double_press_speed, double_press_speed, DoublePressSpeed);
+
+#[tauri::command]
+pub fn set_double_press_speed(
+    app: AppHandle,
+    config: State<ConfigArc>,
+    value: DoublePressSpeed,
+) -> Result<(), JpixelError> {
+    let mut cfg = lock_or_warn!(config);
+    cfg.double_press_speed = value;
+    let clone = cfg.clone();
+    drop(cfg);
+    crate::overlay::set_options(
+        clone.crosshair_guides,
+        clone.selection_mode,
+        clone.double_press_enabled,
+        clone.double_press_speed.window_ms(),
+    );
+    save_config(&app, &clone)
+}
 
 #[tauri::command]
 pub fn set_crosshair_guides(
@@ -239,7 +304,12 @@ pub fn set_crosshair_guides(
     cfg.crosshair_guides = value;
     let clone = cfg.clone();
     drop(cfg);
-    crate::overlay::set_options(clone.crosshair_guides, clone.selection_mode);
+    crate::overlay::set_options(
+        clone.crosshair_guides,
+        clone.selection_mode,
+        clone.double_press_enabled,
+        clone.double_press_speed.window_ms(),
+    );
     save_config(&app, &clone)
 }
 
@@ -253,7 +323,12 @@ pub fn set_selection_mode(
     cfg.selection_mode = value;
     let clone = cfg.clone();
     drop(cfg);
-    crate::overlay::set_options(clone.crosshair_guides, clone.selection_mode);
+    crate::overlay::set_options(
+        clone.crosshair_guides,
+        clone.selection_mode,
+        clone.double_press_enabled,
+        clone.double_press_speed.window_ms(),
+    );
     save_config(&app, &clone)
 }
 

@@ -57,6 +57,8 @@ static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 pub struct OverlayOptions {
     pub crosshair_guides: bool,
     pub selection_mode: SelectionMode,
+    pub double_press_enabled: bool,
+    pub double_press_window_ms: u64,
 }
 
 impl Default for OverlayOptions {
@@ -64,6 +66,8 @@ impl Default for OverlayOptions {
         Self {
             crosshair_guides: true,
             selection_mode: SelectionMode::Reselect,
+            double_press_enabled: false,
+            double_press_window_ms: 500,
         }
     }
 }
@@ -71,6 +75,8 @@ impl Default for OverlayOptions {
 static OPTIONS: Mutex<OverlayOptions> = Mutex::new(OverlayOptions {
     crosshair_guides: true,
     selection_mode: SelectionMode::Reselect,
+    double_press_enabled: false,
+    double_press_window_ms: 500,
 });
 
 fn current_options() -> OverlayOptions {
@@ -186,6 +192,7 @@ struct OverlayState {
     cursor: Option<POINT>,
     resize_drag: Option<ResizeDrag>,
     move_drag: Option<MoveDrag>,
+    last_hotkey_press: Option<Instant>,
 }
 
 impl OverlayState {
@@ -214,6 +221,7 @@ impl OverlayState {
             cursor: None,
             resize_drag: None,
             move_drag: None,
+            last_hotkey_press: None,
         }
     }
 }
@@ -294,11 +302,18 @@ pub fn init() -> Result<()> {
 }
 
 /// Update live overlay options from the settings thread.
-pub fn set_options(crosshair_guides: bool, selection_mode: SelectionMode) {
+pub fn set_options(
+    crosshair_guides: bool,
+    selection_mode: SelectionMode,
+    double_press_enabled: bool,
+    double_press_window_ms: u64,
+) {
     if let Ok(mut options) = OPTIONS.lock() {
         *options = OverlayOptions {
             crosshair_guides,
             selection_mode,
+            double_press_enabled,
+            double_press_window_ms,
         };
     }
     let raw = OVERLAY_HWND.load(Ordering::SeqCst);
@@ -581,6 +596,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.cursor = initial_cursor;
         state.resize_drag = None;
         state.move_drag = None;
+        state.last_hotkey_press = None;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -1179,6 +1195,7 @@ fn hide_overlay_for_recapture() {
         state.cursor = None;
         state.resize_drag = None;
         state.move_drag = None;
+        state.last_hotkey_press = None;
         state.start = None;
         state.end = None;
         state.back = None;
@@ -1208,6 +1225,7 @@ pub fn hide_overlay() {
         state.cursor = None;
         state.resize_drag = None;
         state.move_drag = None;
+        state.last_hotkey_press = None;
         state.start = None;
         state.end = None;
         state.back = None;
@@ -1389,6 +1407,23 @@ fn cancel_and_close() {
 
 fn handle_hotkey() {
     let recapture = is_visible();
+    if !recapture && current_options().double_press_enabled {
+        let now = Instant::now();
+        let window = Duration::from_millis(current_options().double_press_window_ms);
+        let should_capture = with_state_mut(|state| {
+            let should = state
+                .last_hotkey_press
+                .map(|last| now.duration_since(last) <= window)
+                .unwrap_or(false);
+            state.last_hotkey_press = if should { None } else { Some(now) };
+            Ok(should)
+        })
+        .unwrap_or(false);
+        if !should_capture {
+            log::debug!("double-press enabled: waiting for the second press");
+            return;
+        }
+    }
     if recapture {
         log::debug!("native hotkey received; recapturing on the current target monitor");
     } else {

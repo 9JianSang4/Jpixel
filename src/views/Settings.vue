@@ -91,6 +91,19 @@
 
         <div class="setting-row">
           <div class="setting-info">
+            <div class="setting-label">双击速度</div>
+            <p class="setting-desc">两次按键之间的最大间隔；越慢越容易触发。</p>
+          </div>
+          <SettingsSelect
+            v-model="doublePressSpeed"
+            :options="doublePressSpeedOptions"
+            aria-label="双击速度"
+            @change="onDoublePressSpeedChange"
+          />
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
             <div class="setting-label">默认操作</div>
             <p class="setting-desc">双击或按 Enter 时执行的操作。</p>
           </div>
@@ -298,7 +311,10 @@ import {
   setCrosshairGuides,
   getSelectionMode,
   setSelectionMode,
+  getDoublePressSpeed,
+  setDoublePressSpeed,
   type SelectionMode,
+  type DoublePressSpeed,
 } from "../api/ipc";
 import { formatHotkey } from "../utils/hotkey";
 import SettingsSelect from "../components/SettingsSelect.vue";
@@ -314,6 +330,7 @@ const pinHotkey = ref("Ctrl+T");
 const defaultAction = ref("save_and_edit");
 const crosshairGuides = ref(true);
 const selectionMode = ref("reselect");
+const doublePressSpeed = ref("normal");
 const recordingMode = ref<string | null>(null);
 const hotkeyError = ref<string | null>(null);
 
@@ -334,6 +351,12 @@ const selectionModeOptions = [
   { value: "resize", label: "调整大小" },
 ];
 
+const doublePressSpeedOptions = [
+  { value: "slow", label: "慢（700ms）" },
+  { value: "normal", label: "标准（500ms）" },
+  { value: "fast", label: "快（300ms）" },
+];
+
 function hotkeyKeys(value: string): string[] {
   return value
     .split("+")
@@ -352,6 +375,7 @@ onMounted(async () => {
     defaultAction.value = await getDefaultAction();
     crosshairGuides.value = await getCrosshairGuides();
     selectionMode.value = await getSelectionMode();
+    doublePressSpeed.value = await getDoublePressSpeed();
   } catch (e) {
     console.error("Failed to load settings:", e);
   }
@@ -384,6 +408,12 @@ function onCrosshairChange() {
 function onSelectionModeChange() {
   setSelectionMode(selectionMode.value as SelectionMode).catch((err: unknown) => {
     console.error("Failed to set selection mode:", err);
+  });
+}
+
+function onDoublePressSpeedChange() {
+  setDoublePressSpeed(doublePressSpeed.value as DoublePressSpeed).catch((err: unknown) => {
+    console.error("Failed to set double press speed:", err);
   });
 }
 

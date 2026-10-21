@@ -230,6 +230,8 @@ pub fn run() {
             config::set_crosshair_guides,
             config::get_selection_mode,
             config::set_selection_mode,
+            config::get_double_press_speed,
+            config::set_double_press_speed,
             config::get_default_action,
             config::set_default_action,
             // Clipboard
@@ -266,6 +268,8 @@ pub fn run() {
                 overlay::OverlayOptions {
                     crosshair_guides: cfg.crosshair_guides,
                     selection_mode: cfg.selection_mode,
+                    double_press_enabled: cfg.double_press_enabled,
+                    double_press_window_ms: cfg.double_press_speed.window_ms(),
                 }
             };
             if let Err(e) = overlay::start(&native_hotkey, native_options) {
