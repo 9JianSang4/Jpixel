@@ -22,10 +22,13 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, EndPaint,
-    FillRect, GetStockObject, RoundRect, ScreenToClient, SelectObject, SetBkMode, SetTextColor,
-    UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_BRUSH, NULL_PEN,
+    AlphaBlend, BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint,
+    FillRect, GetStockObject, RestoreDC, RoundRect, SaveDC, ScreenToClient, SelectClipRgn,
+    SelectObject, SetBkMode, SetTextColor, SetViewportOrgEx, UpdateWindow, AC_SRC_OVER,
+    BLENDFUNCTION,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER,
+    DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_BRUSH, NULL_PEN,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -289,6 +292,7 @@ struct OverlayState {
     preview_start: Option<Instant>,
     toolbar_motion: Option<ToolbarMotion>,
     toolbar_has_appeared: bool,
+    toolbar_freeze: Option<RECT>,
 }
 
 impl OverlayState {
@@ -331,6 +335,7 @@ impl OverlayState {
             preview_start: None,
             toolbar_motion: None,
             toolbar_has_appeared: false,
+            toolbar_freeze: None,
         }
     }
 }
@@ -727,6 +732,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.preview_start = None;
         state.toolbar_motion = None;
         state.toolbar_has_appeared = false;
+        state.toolbar_freeze = None;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -812,7 +818,7 @@ fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 
 fn toolbar_target_rect(state: &OverlayState) -> Option<RECT> {
     if state.dragging {
-        return None;
+        return state.toolbar_freeze;
     }
     let image = state.image.as_ref()?;
     let selection = selection_rect(state)?;
@@ -849,6 +855,9 @@ fn toolbar_motion_point(motion: &ToolbarMotion, now: Instant) -> POINT {
 }
 
 fn toolbar_rect(state: &OverlayState) -> Option<RECT> {
+    if state.dragging {
+        return state.toolbar_freeze;
+    }
     let target = toolbar_target_rect(state)?;
     let Some(motion) = state.toolbar_motion else {
         return Some(target);
@@ -960,7 +969,7 @@ fn pen_rgb(state: &OverlayState) -> (u8, u8, u8) {
     PEN_PALETTE[state.pen_color_index.min(PEN_PALETTE.len() - 1)]
 }
 
-fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
+fn draw_pen_color_preview(hdc: HDC, _back: &Dib, state: &OverlayState) {
     if state.hover_button != Some(ToolbarButton::Pen) {
         return;
     }
@@ -1006,6 +1015,10 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
         );
 
         // Checkerboard so low-opacity colors (especially white) are visible.
+        // Clip it to the rounded card so it cannot spill past the border.
+        let clip = CreateRoundRectRgn(left, top, left + size + 1, top + size + 1, 10, 10);
+        let saved = SaveDC(hdc);
+        SelectClipRgn(hdc, clip);
         let light = CreateSolidBrush(rgb(236, 236, 238));
         let dark = CreateSolidBrush(rgb(118, 118, 124));
         let cell = 6;
@@ -1023,11 +1036,22 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
         }
         let _ = DeleteObject(HGDIOBJ(light.0));
         let _ = DeleteObject(HGDIOBJ(dark.0));
+        let _ = RestoreDC(hdc, saved);
+        let _ = DeleteObject(HGDIOBJ(clip.0));
 
-        // Blend the selected color over the checkerboard using its alpha.
-        for y in top..top + size {
-            back.blend_hline(y, left, left + size, (r, g, b), state.pen_alpha);
-        }
+        // Rounded alpha fill, clipped by GDI+ so it cannot exceed the border.
+        let alpha = state.pen_alpha as u32;
+        let argb = (alpha << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+        crate::round_rect::draw_round_rect(
+            hdc,
+            left,
+            top,
+            left + size,
+            top + size,
+            6.0,
+            Some(argb),
+            None,
+        );
 
         // Inset alpha track: never touches the border, so all four edges stay 1px.
         let track = RECT {
@@ -1064,6 +1088,44 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
             Some((0xFFFFFFFF, 1.0)),
         );
     }
+}
+
+fn draw_toolbar_faded(hdc: HDC, back: &Dib, state: &OverlayState) -> Result<()> {
+    let Some(rect) = toolbar_rect(state) else {
+        return Ok(());
+    };
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    unsafe {
+        let memory = CreateCompatibleDC(hdc);
+        let bitmap = CreateCompatibleBitmap(hdc, width, height);
+        let old = SelectObject(memory, HGDIOBJ(bitmap.0));
+        let _ = SetViewportOrgEx(memory, -rect.left, -rect.top, None);
+        draw_toolbar(memory, back, state)?;
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 110,
+            AlphaFormat: 0,
+        };
+        let _ = AlphaBlend(
+            hdc,
+            rect.left,
+            rect.top,
+            width,
+            height,
+            memory,
+            0,
+            0,
+            width,
+            height,
+            blend,
+        );
+        SelectObject(memory, old);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(memory);
+    }
+    Ok(())
 }
 
 fn draw_toolbar(hdc: HDC, back: &Dib, state: &OverlayState) -> Result<()> {
@@ -2021,6 +2083,7 @@ pub fn hide_overlay() {
         state.preview_start = None;
         state.toolbar_motion = None;
         state.toolbar_has_appeared = false;
+        state.toolbar_freeze = None;
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
@@ -2282,7 +2345,12 @@ fn paint(hwnd: HWND) {
                         draw_crosshair(back, state)?;
                         draw_handles(hdc, state)?;
                         draw_eraser_cursor(hdc, state)?;
-                        draw_toolbar(hdc, back, state)
+                        if state.toolbar_freeze.is_some() {
+                            draw_toolbar_faded(hdc, back, state)?;
+                        } else {
+                            draw_toolbar(hdc, back, state)?;
+                        }
+                        Ok(())
                     })
                 {
                     log::error!("native overlay paint failed: {e}");
@@ -2428,6 +2496,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             } else if begin_stroke(hwnd, pt, DrawTool::Pen) {
                 return LRESULT(0);
             }
+            let frozen_toolbar = with_state(toolbar_rect).ok().flatten();
             let _ = SetCapture(hwnd);
             clip_cursor_to_window(hwnd);
             with_state_mut(|state| {
@@ -2436,6 +2505,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 let clamped = clamp_to_image(state, pt);
                 state.dragging = true;
+                state.toolbar_freeze = frozen_toolbar;
                 state.hover_button = None;
                 state.resize_drag = None;
                 state.move_drag = None;
@@ -2614,6 +2684,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             let was_adjusting = with_state_mut(|state| {
                 let adjusting = state.resize_drag.is_some() || state.move_drag.is_some();
+                let frozen = state.toolbar_freeze.take();
                 state.resize_drag = None;
                 state.move_drag = None;
                 state.dragging = false;
@@ -2626,7 +2697,29 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         }
                     }
                 }
-                sync_toolbar_motion(state);
+                if let Some(frozen) = frozen {
+                    state.toolbar_has_appeared = true;
+                    if let Some(target) = toolbar_target_rect(state) {
+                        state.toolbar_motion = Some(ToolbarMotion {
+                            from: POINT {
+                                x: frozen.left,
+                                y: frozen.top,
+                            },
+                            to: POINT {
+                                x: target.left,
+                                y: target.top,
+                            },
+                            start: Instant::now(),
+                        });
+                        unsafe {
+                            let _ = SetTimer(state.hwnd, TOOLBAR_TIMER_ID, 16, None);
+                        }
+                    } else {
+                        state.toolbar_motion = None;
+                    }
+                } else {
+                    sync_toolbar_motion(state);
+                }
                 Ok(adjusting)
             })
             .unwrap_or(false);
