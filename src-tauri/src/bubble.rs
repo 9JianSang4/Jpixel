@@ -9,13 +9,12 @@ use std::time::Instant;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
-    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
-    GetMonitorInfoW, GetStockObject, InvalidateRect, MonitorFromPoint, RoundRect, SelectObject,
-    SetBkMode, SetTextColor, SetWindowRgn, UpdateWindow, CLEARTYPE_QUALITY, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FW_BOLD, FW_NORMAL, HDC,
-    HGDIOBJ, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_BRUSH, NULL_PEN,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
+    CreateRoundRectRgn, DeleteDC, DeleteObject, DrawTextW, EndPaint, GetMonitorInfoW,
+    InvalidateRect, MonitorFromPoint, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
+    UpdateWindow, CLEARTYPE_QUALITY, DEFAULT_CHARSET, DEFAULT_PITCH, DT_LEFT, DT_SINGLELINE,
+    DT_VCENTER, DT_WORDBREAK, FW_BOLD, FW_NORMAL, HDC, HGDIOBJ, HFONT, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -295,29 +294,16 @@ unsafe fn paint_bubble(hwnd: HWND, hdc: HDC, state: &BubbleState) {
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
 
-    let background = CreateSolidBrush(rgb(32, 32, 36));
-    let old_brush = SelectObject(hdc, HGDIOBJ(background.0));
-    let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-    let _ = RoundRect(hdc, 0, 0, client.right, client.bottom, 14, 14);
-    SelectObject(hdc, old_pen);
-    SelectObject(hdc, old_brush);
-    let _ = DeleteObject(HGDIOBJ(background.0));
-
-    let border = CreatePen(PS_SOLID, 1, rgb(255, 255, 255));
-    let old_pen = SelectObject(hdc, HGDIOBJ(border.0));
-    let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    let _ = RoundRect(
+    crate::round_rect::draw_round_rect(
         hdc,
-        1,
-        1,
-        client.right - 1,
-        client.bottom - 1,
-        12,
-        12,
+        0,
+        0,
+        client.right,
+        client.bottom,
+        14.0,
+        Some(0xFF202024),
+        None,
     );
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    let _ = DeleteObject(HGDIOBJ(border.0));
 
     let _ = SetBkMode(hdc, TRANSPARENT);
 

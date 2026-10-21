@@ -12,6 +12,7 @@ pub mod core;
 pub mod error;
 pub mod overlay;
 mod pin;
+mod round_rect;
 mod shortcut;
 mod window;
 

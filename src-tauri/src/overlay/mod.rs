@@ -240,6 +240,16 @@ const TOOLBAR_GAP: i32 = 2;
 const TOOLBAR_OFFSET: i32 = 8;
 const TOOLBAR_W: i32 = 7 * TOOLBAR_BUTTON_W + 6 * TOOLBAR_GAP + 2 * TOOLBAR_PAD;
 const TOOLBAR_H: i32 = TOOLBAR_BUTTON_H + 2 * TOOLBAR_PAD;
+const TOOLBAR_ANIM_MS: u128 = 160;
+const TOOLBAR_ANIM_OFFSET: i32 = 8;
+const TOOLBAR_TIMER_ID: usize = 0x52;
+
+#[derive(Debug, Clone, Copy)]
+struct ToolbarMotion {
+    from: POINT,
+    to: POINT,
+    start: Instant,
+}
 
 struct OverlayState {
     hwnd: HWND,
@@ -277,6 +287,8 @@ struct OverlayState {
     active_applied: usize,
     pending_pin_confirm: bool,
     preview_start: Option<Instant>,
+    toolbar_motion: Option<ToolbarMotion>,
+    toolbar_has_appeared: bool,
 }
 
 impl OverlayState {
@@ -317,6 +329,8 @@ impl OverlayState {
             active_applied: 0,
             pending_pin_confirm: false,
             preview_start: None,
+            toolbar_motion: None,
+            toolbar_has_appeared: false,
         }
     }
 }
@@ -711,6 +725,8 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.active_stroke = None;
         state.pending_pin_confirm = false;
         state.preview_start = None;
+        state.toolbar_motion = None;
+        state.toolbar_has_appeared = false;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -794,7 +810,7 @@ fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(r as u32 | ((g as u32) << 8) | ((b as u32) << 16))
 }
 
-fn toolbar_rect(state: &OverlayState) -> Option<RECT> {
+fn toolbar_target_rect(state: &OverlayState) -> Option<RECT> {
     if state.dragging {
         return None;
     }
@@ -815,6 +831,75 @@ fn toolbar_rect(state: &OverlayState) -> Option<RECT> {
         right: left + TOOLBAR_W,
         bottom: top + TOOLBAR_H,
     })
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn toolbar_motion_point(motion: &ToolbarMotion, now: Instant) -> POINT {
+    let progress = (now.duration_since(motion.start).as_millis() as f32
+        / TOOLBAR_ANIM_MS as f32)
+        .min(1.0);
+    let eased = ease_out_cubic(progress);
+    POINT {
+        x: motion.from.x + ((motion.to.x - motion.from.x) as f32 * eased).round() as i32,
+        y: motion.from.y + ((motion.to.y - motion.from.y) as f32 * eased).round() as i32,
+    }
+}
+
+fn toolbar_rect(state: &OverlayState) -> Option<RECT> {
+    let target = toolbar_target_rect(state)?;
+    let Some(motion) = state.toolbar_motion else {
+        return Some(target);
+    };
+    let point = toolbar_motion_point(&motion, Instant::now());
+    Some(RECT {
+        left: point.x,
+        top: point.y,
+        right: point.x + TOOLBAR_W,
+        bottom: point.y + TOOLBAR_H,
+    })
+}
+
+fn sync_toolbar_motion(state: &mut OverlayState) {
+    let Some(target) = toolbar_target_rect(state) else {
+        return;
+    };
+    let target_point = POINT {
+        x: target.left,
+        y: target.top,
+    };
+    let now = Instant::now();
+    if !state.toolbar_has_appeared {
+        state.toolbar_has_appeared = true;
+        let from = POINT {
+            x: target_point.x,
+            y: target_point.y + TOOLBAR_ANIM_OFFSET,
+        };
+        state.toolbar_motion = Some(ToolbarMotion {
+            from,
+            to: target_point,
+            start: now,
+        });
+    } else if state
+        .toolbar_motion
+        .map(|motion| motion.to != target_point)
+        .unwrap_or(true)
+    {
+        let from = state
+            .toolbar_motion
+            .map(|motion| toolbar_motion_point(&motion, now))
+            .unwrap_or(target_point);
+        state.toolbar_motion = Some(ToolbarMotion {
+            from,
+            to: target_point,
+            start: now,
+        });
+    }
+    unsafe {
+        let _ = SetTimer(state.hwnd, TOOLBAR_TIMER_ID, 16, None);
+    }
 }
 
 fn toolbar_button_rects(state: &OverlayState) -> Vec<(ToolbarButton, RECT)> {
@@ -875,43 +960,6 @@ fn pen_rgb(state: &OverlayState) -> (u8, u8, u8) {
     PEN_PALETTE[state.pen_color_index.min(PEN_PALETTE.len() - 1)]
 }
 
-fn fill_frame(hdc: HDC, rect: RECT, thickness: i32, color: COLORREF) {
-    let t = thickness.max(1);
-    let pieces = [
-        RECT {
-            left: rect.left,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.top + t,
-        },
-        RECT {
-            left: rect.left,
-            top: rect.bottom - t,
-            right: rect.right,
-            bottom: rect.bottom,
-        },
-        RECT {
-            left: rect.left,
-            top: rect.top + t,
-            right: rect.left + t,
-            bottom: rect.bottom - t,
-        },
-        RECT {
-            left: rect.right - t,
-            top: rect.top + t,
-            right: rect.right,
-            bottom: rect.bottom - t,
-        },
-    ];
-    unsafe {
-        let brush = CreateSolidBrush(color);
-        for piece in pieces {
-            let _ = FillRect(hdc, &piece, brush);
-        }
-        let _ = DeleteObject(HGDIOBJ(brush.0));
-    }
-}
-
 fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
     if state.hover_button != Some(ToolbarButton::Pen) {
         return;
@@ -946,6 +994,17 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
     };
     let (r, g, b) = pen_rgb(state);
     unsafe {
+        crate::round_rect::draw_round_rect(
+            hdc,
+            left - 4,
+            top - 4,
+            left + size + 4,
+            top + size + 4,
+            10.0,
+            Some(0xFF1C1C1E),
+            None,
+        );
+
         // Checkerboard so low-opacity colors (especially white) are visible.
         let light = CreateSolidBrush(rgb(236, 236, 238));
         let dark = CreateSolidBrush(rgb(118, 118, 124));
@@ -993,22 +1052,17 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
         let _ = FillRect(hdc, &fill, fill_brush);
         let _ = DeleteObject(HGDIOBJ(fill_brush.0));
 
-        // Symmetric 4px dark outer frame, then a 1px white inner frame.
-        let outer = RECT {
-            left: left - 4,
-            top: top - 4,
-            right: left + size + 4,
-            bottom: top + size + 4,
-        };
-        fill_frame(hdc, outer, 4, rgb(28, 28, 30));
-
-        let frame = RECT {
+        // Vector border, anti-aliased by GDI+.
+        crate::round_rect::draw_round_rect(
+            hdc,
             left,
             top,
-            right: left + size,
-            bottom: top + size,
-        };
-        fill_frame(hdc, frame, 1, rgb(255, 255, 255));
+            left + size,
+            top + size,
+            6.0,
+            None,
+            Some((0xFFFFFFFF, 1.0)),
+        );
     }
 }
 
@@ -1921,6 +1975,7 @@ fn hide_overlay_for_recapture() {
         let hwnd = state.hwnd;
         unsafe {
             let _ = KillTimer(hwnd, PREVIEW_TIMER_ID);
+            let _ = KillTimer(hwnd, TOOLBAR_TIMER_ID);
         }
         state.visible = false;
         state.dragging = false;
@@ -1961,8 +2016,11 @@ pub fn hide_overlay() {
         let prev = state.prev_foreground;
         unsafe {
             let _ = KillTimer(hwnd, PREVIEW_TIMER_ID);
+            let _ = KillTimer(hwnd, TOOLBAR_TIMER_ID);
         }
         state.preview_start = None;
+        state.toolbar_motion = None;
+        state.toolbar_has_appeared = false;
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
@@ -2298,6 +2356,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     }
                 }
                 gdi::invalidate(hwnd);
+            } else if wparam.0 == TOOLBAR_TIMER_ID {
+                let done = with_state(|state| {
+                    state
+                        .toolbar_motion
+                        .map(|motion| motion.start.elapsed().as_millis() >= TOOLBAR_ANIM_MS)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(true);
+                if done {
+                    unsafe {
+                        let _ = KillTimer(hwnd, TOOLBAR_TIMER_ID);
+                    }
+                }
+                gdi::invalidate(hwnd);
             }
             LRESULT(0)
         }
@@ -2488,6 +2560,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     if let Some(bounds) = image_bounds(state) {
                         let next = resize_selection(drag.start_rect, drag.handle, pt, bounds);
                         set_selection(state, next);
+                        sync_toolbar_motion(state);
                     }
                     return Ok(());
                 }
@@ -2499,6 +2572,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         };
                         let next = move_selection(drag.start_rect, delta, bounds);
                         set_selection(state, next);
+                        sync_toolbar_motion(state);
                     }
                     return Ok(());
                 }
@@ -2552,6 +2626,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         }
                     }
                 }
+                sync_toolbar_motion(state);
                 Ok(adjusting)
             })
             .unwrap_or(false);
