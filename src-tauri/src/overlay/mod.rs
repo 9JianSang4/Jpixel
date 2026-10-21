@@ -10,7 +10,7 @@ use crate::core::monitor::{self, MonitorInfo};
 use anyhow::{anyhow, Result};
 use arboard::{Clipboard, ImageData};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+use image::{ColorType, ImageEncoder, RgbaImage};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fs::File;
@@ -22,12 +22,11 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse,
-    EndPaint, FillRect, GetStockObject, IntersectClipRect, LineTo, MoveToEx, RestoreDC, RoundRect,
-    SaveDC, ScreenToClient, SelectObject, SetBkMode, SetTextColor, UpdateWindow, CLEARTYPE_QUALITY,
-    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
-    FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID,
-    TRANSPARENT,
+    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
+    FillRect, GetStockObject, RoundRect, ScreenToClient, SelectObject, SetBkMode, SetTextColor,
+    UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
+    DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -45,8 +44,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW,
     IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_SIZEALL, MB_ICONERROR, MB_OK, MSG,
     SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY,
-    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WM_SETCURSOR, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 const HOTKEY_ID: i32 = 0x4A50; // "JP"
@@ -174,11 +174,22 @@ enum DrawTool {
 struct Stroke {
     tool: DrawTool,
     color: COLORREF,
+    alpha: u8,
     width: i32,
     points: Vec<POINT>,
 }
 
-const PEN_COLOR: COLORREF = COLORREF(255 | (70 << 8) | (70 << 16)); // RGB(255, 70, 70)
+const PEN_PALETTE: [(u8, u8, u8); 9] = [
+    (255, 70, 70),
+    (255, 149, 0),
+    (255, 214, 10),
+    (52, 199, 89),
+    (50, 173, 230),
+    (47, 111, 237),
+    (175, 82, 222),
+    (255, 255, 255),
+    (30, 30, 30),
+];
 const PEN_WIDTH: i32 = 3;
 const ERASER_WIDTH: i32 = 20;
 
@@ -188,18 +199,16 @@ enum ToolbarButton {
     Save,
     Pin,
     Pen,
-    Eraser,
     Undo,
     Redo,
     Close,
 }
 
-const TOOLBAR_ITEMS: [(ToolbarButton, &str); 8] = [
+const TOOLBAR_ITEMS: [(ToolbarButton, &str); 7] = [
     (ToolbarButton::Copy, "复制"),
     (ToolbarButton::Save, "保存"),
     (ToolbarButton::Pin, "贴图"),
     (ToolbarButton::Pen, "画笔"),
-    (ToolbarButton::Eraser, "橡皮"),
     (ToolbarButton::Undo, "撤销"),
     (ToolbarButton::Redo, "重做"),
     (ToolbarButton::Close, "关闭"),
@@ -210,7 +219,7 @@ const TOOLBAR_BUTTON_H: i32 = 34;
 const TOOLBAR_PAD: i32 = 6;
 const TOOLBAR_GAP: i32 = 2;
 const TOOLBAR_OFFSET: i32 = 8;
-const TOOLBAR_W: i32 = 8 * TOOLBAR_BUTTON_W + 7 * TOOLBAR_GAP + 2 * TOOLBAR_PAD;
+const TOOLBAR_W: i32 = 7 * TOOLBAR_BUTTON_W + 6 * TOOLBAR_GAP + 2 * TOOLBAR_PAD;
 const TOOLBAR_H: i32 = TOOLBAR_BUTTON_H + 2 * TOOLBAR_PAD;
 
 struct OverlayState {
@@ -242,6 +251,8 @@ struct OverlayState {
     strokes: Vec<Stroke>,
     redo: Vec<Stroke>,
     active_stroke: Option<Stroke>,
+    pen_color_index: usize,
+    pen_alpha: u8,
 }
 
 impl OverlayState {
@@ -275,6 +286,8 @@ impl OverlayState {
             strokes: Vec::new(),
             redo: Vec::new(),
             active_stroke: None,
+            pen_color_index: 0,
+            pen_alpha: 255,
         }
     }
 }
@@ -785,7 +798,7 @@ fn toolbar_button_at(state: &OverlayState, point: POINT) -> Option<ToolbarButton
 fn toolbar_button_enabled(state: &OverlayState, button: ToolbarButton) -> bool {
     match button {
         ToolbarButton::Copy | ToolbarButton::Save | ToolbarButton::Close => true,
-        ToolbarButton::Pen | ToolbarButton::Eraser => true,
+        ToolbarButton::Pen => true,
         ToolbarButton::Undo => !state.strokes.is_empty(),
         ToolbarButton::Redo => !state.redo.is_empty(),
         ToolbarButton::Pin => false,
@@ -798,10 +811,72 @@ fn toolbar_glyph(button: ToolbarButton) -> char {
         ToolbarButton::Save => '\u{E74E}',
         ToolbarButton::Pin => '\u{E718}',
         ToolbarButton::Pen => '\u{E70F}',
-        ToolbarButton::Eraser => '\u{E75C}',
         ToolbarButton::Undo => '\u{E7A7}',
         ToolbarButton::Redo => '\u{E7A6}',
         ToolbarButton::Close => '\u{E711}',
+    }
+}
+
+fn pen_rgb(state: &OverlayState) -> (u8, u8, u8) {
+    PEN_PALETTE[state.pen_color_index.min(PEN_PALETTE.len() - 1)]
+}
+
+fn draw_pen_color_preview(hdc: HDC, state: &OverlayState) {
+    if state.hover_button != Some(ToolbarButton::Pen) {
+        return;
+    }
+    let Some(toolbar) = toolbar_rect(state) else {
+        return;
+    };
+    let Some((_, pen_rect)) = toolbar_button_rects(state)
+        .into_iter()
+        .find(|(button, _)| *button == ToolbarButton::Pen)
+    else {
+        return;
+    };
+    let size = 24;
+    let left = pen_rect.left + (TOOLBAR_BUTTON_W - size) / 2;
+    let top = if toolbar.top - size - 10 >= 2 {
+        toolbar.top - size - 8
+    } else {
+        toolbar.bottom + 6
+    };
+    let (r, g, b) = pen_rgb(state);
+    unsafe {
+        let backdrop = CreateSolidBrush(rgb(28, 28, 30));
+        let old_brush = SelectObject(hdc, HGDIOBJ(backdrop.0));
+        let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+        let _ = RoundRect(hdc, left - 3, top - 3, left + size + 3, top + size + 3, 8, 8);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(backdrop.0));
+
+        let color = CreateSolidBrush(rgb(r, g, b));
+        let old_brush = SelectObject(hdc, HGDIOBJ(color.0));
+        let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+        let _ = RoundRect(hdc, left, top, left + size, top + size, 6, 6);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(color.0));
+
+        let border = CreatePen(PS_SOLID, 1, rgb(255, 255, 255));
+        let old_pen = SelectObject(hdc, HGDIOBJ(border.0));
+        let old_brush = SelectObject(hdc, GetStockObject(NULL_PEN));
+        let _ = RoundRect(hdc, left, top, left + size, top + size, 6, 6);
+        SelectObject(hdc, old_brush);
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(HGDIOBJ(border.0));
+
+        let alpha_width = ((size - 4) as u32 * state.pen_alpha as u32 / 255) as i32;
+        let bar = RECT {
+            left: left + 2,
+            top: top + size - 4,
+            right: left + 2 + alpha_width,
+            bottom: top + size - 1,
+        };
+        let bar_brush = CreateSolidBrush(rgb(255, 255, 255));
+        let _ = FillRect(hdc, &bar, bar_brush);
+        let _ = DeleteObject(HGDIOBJ(bar_brush.0));
     }
 }
 
@@ -850,7 +925,6 @@ fn draw_toolbar(hdc: HDC, state: &OverlayState) -> Result<()> {
             let active = matches!(
                 (button, state.tool),
                 (ToolbarButton::Pen, Some(DrawTool::Pen))
-                    | (ToolbarButton::Eraser, Some(DrawTool::Eraser))
             );
             if enabled && (active || state.hover_button == Some(button)) {
                 let fill = if active {
@@ -882,6 +956,7 @@ fn draw_toolbar(hdc: HDC, state: &OverlayState) -> Result<()> {
             );
         }
 
+        draw_pen_color_preview(hdc, state);
         SelectObject(hdc, old_font);
         let _ = DeleteObject(HGDIOBJ(font.0));
     }
@@ -908,6 +983,7 @@ fn undo_stroke() {
         if let Some(stroke) = state.strokes.pop() {
             state.redo.push(stroke);
         }
+        let _ = refresh_annotated(state);
         Ok(())
     });
     invalidate_overlay();
@@ -918,6 +994,7 @@ fn redo_stroke() {
         if let Some(stroke) = state.redo.pop() {
             state.strokes.push(stroke);
         }
+        let _ = refresh_annotated(state);
         Ok(())
     });
     invalidate_overlay();
@@ -929,7 +1006,6 @@ fn handle_toolbar_click(button: ToolbarButton) {
         ToolbarButton::Save => save_and_close(),
         ToolbarButton::Close => cancel_and_close(),
         ToolbarButton::Pen => toggle_tool(DrawTool::Pen),
-        ToolbarButton::Eraser => toggle_tool(DrawTool::Eraser),
         ToolbarButton::Undo => undo_stroke(),
         ToolbarButton::Redo => redo_stroke(),
         ToolbarButton::Pin => log::debug!("pin is not implemented until P2.3"),
@@ -1107,97 +1183,6 @@ fn draw_handles(hdc: HDC, state: &OverlayState) -> Result<()> {
     Ok(())
 }
 
-fn for_each_segment_point(a: POINT, b: POINT, step: i32, mut f: impl FnMut(POINT)) {
-    let dx = b.x - a.x;
-    let dy = b.y - a.y;
-    let steps = dx.abs().max(dy.abs()).max(1) / step.max(1) + 1;
-    for index in 0..=steps {
-        let t = index as f32 / steps as f32;
-        f(POINT {
-            x: a.x + (dx as f32 * t).round() as i32,
-            y: a.y + (dy as f32 * t).round() as i32,
-        });
-    }
-}
-
-fn draw_stroke(hdc: HDC, stroke: &Stroke, original: Option<&Dib>, clip: RECT) {
-    if stroke.points.is_empty() {
-        return;
-    }
-    unsafe {
-        match stroke.tool {
-            DrawTool::Pen => {
-                let pen = CreatePen(PS_SOLID, stroke.width.max(1), stroke.color);
-                let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
-                if stroke.points.len() == 1 {
-                    let point = stroke.points[0];
-                    let brush = CreateSolidBrush(stroke.color);
-                    let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
-                    let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-                    let radius = stroke.width.max(1);
-                    let _ = Ellipse(
-                        hdc,
-                        point.x - radius,
-                        point.y - radius,
-                        point.x + radius,
-                        point.y + radius,
-                    );
-                    SelectObject(hdc, old_pen);
-                    SelectObject(hdc, old_brush);
-                    let _ = DeleteObject(HGDIOBJ(brush.0));
-                } else {
-                    for pair in stroke.points.windows(2) {
-                        let _ = MoveToEx(hdc, pair[0].x, pair[0].y, None);
-                        let _ = LineTo(hdc, pair[1].x, pair[1].y);
-                    }
-                }
-                SelectObject(hdc, old_pen);
-                let _ = DeleteObject(HGDIOBJ(pen.0));
-            }
-            DrawTool::Eraser => {
-                let Some(original) = original else {
-                    return;
-                };
-                let radius = (stroke.width / 2).max(1);
-                for pair in stroke.points.windows(2) {
-                    for_each_segment_point(pair[0], pair[1], radius.max(1), |point| {
-                        let left = (point.x - radius).clamp(clip.left, clip.right);
-                        let top = (point.y - radius).clamp(clip.top, clip.bottom);
-                        let right = (point.x + radius).clamp(clip.left, clip.right);
-                        let bottom = (point.y + radius).clamp(clip.top, clip.bottom);
-                        let width = right - left;
-                        let height = bottom - top;
-                        if width > 0 && height > 0 {
-                            let _ = original.blit_region(
-                                hdc, left, top, width, height, left, top,
-                            );
-                        }
-                    });
-                }
-            }
-        }
-    }
-}
-
-fn draw_annotations(hdc: HDC, state: &OverlayState) -> Result<()> {
-    let Some(clip) = selection_rect(state) else {
-        return Ok(());
-    };
-    unsafe {
-        let saved = SaveDC(hdc);
-        let _ = IntersectClipRect(hdc, clip.left, clip.top, clip.right, clip.bottom);
-        for stroke in state
-            .strokes
-            .iter()
-            .chain(state.active_stroke.iter())
-        {
-            draw_stroke(hdc, stroke, state.original.as_ref(), clip);
-        }
-        let _ = RestoreDC(hdc, saved);
-    }
-    Ok(())
-}
-
 fn clamp_to_selection(state: &OverlayState, point: POINT) -> Option<POINT> {
     let selection = selection_rect(state)?;
     Some(POINT {
@@ -1206,11 +1191,22 @@ fn clamp_to_selection(state: &OverlayState, point: POINT) -> Option<POINT> {
     })
 }
 
-fn begin_stroke(hwnd: HWND, point: POINT) -> bool {
+fn refresh_annotated(state: &mut OverlayState) -> Result<()> {
+    let Some(base) = state.image.as_ref() else {
+        return Ok(());
+    };
+    let annotated = render_strokes(base, &state.strokes, state.active_stroke.as_ref());
+    if let Some(original) = state.original.as_mut() {
+        original.replace_from_rgba(&annotated)?;
+    }
+    Ok(())
+}
+
+fn begin_stroke(hwnd: HWND, point: POINT, tool: DrawTool) -> bool {
     let started = with_state_mut(|state| {
-        let Some(tool) = state.tool else {
+        if state.tool != Some(DrawTool::Pen) {
             return Ok(false);
-        };
+        }
         let Some(selection) = selection_rect(state) else {
             return Ok(false);
         };
@@ -1224,16 +1220,25 @@ fn begin_stroke(hwnd: HWND, point: POINT) -> bool {
         let Some(point) = clamp_to_selection(state, point) else {
             return Ok(false);
         };
+        let (color, alpha, width) = match tool {
+            DrawTool::Pen => {
+                let (r, g, b) = PEN_PALETTE[state.pen_color_index.min(PEN_PALETTE.len() - 1)];
+                (
+                    COLORREF(r as u32 | ((g as u32) << 8) | ((b as u32) << 16)),
+                    state.pen_alpha,
+                    PEN_WIDTH,
+                )
+            }
+            DrawTool::Eraser => (COLORREF(0), 255, ERASER_WIDTH),
+        };
         state.active_stroke = Some(Stroke {
             tool,
-            color: PEN_COLOR,
-            width: if tool == DrawTool::Pen {
-                PEN_WIDTH
-            } else {
-                ERASER_WIDTH
-            },
+            color,
+            alpha,
+            width,
             points: vec![point],
         });
+        let _ = refresh_annotated(state);
         Ok(true)
     })
     .unwrap_or(false);
@@ -1252,6 +1257,7 @@ fn finish_stroke() -> bool {
             if !stroke.points.is_empty() {
                 state.strokes.push(stroke);
                 state.redo.clear();
+                let _ = refresh_annotated(state);
             }
             return Ok(true);
         }
@@ -1365,18 +1371,40 @@ fn cropped_selection() -> Result<(RgbaImage, RECT)> {
     Ok((crop, rect))
 }
 
-fn color_rgba(color: COLORREF) -> Rgba<u8> {
-    Rgba([
+fn color_rgb(color: COLORREF) -> (u8, u8, u8) {
+    (
         (color.0 & 0xff) as u8,
         ((color.0 >> 8) & 0xff) as u8,
         ((color.0 >> 16) & 0xff) as u8,
-        255,
-    ])
+    )
+}
+
+fn paint_brush(canvas: &mut RgbaImage, center: POINT, radius: i32, color: (u8, u8, u8), alpha: u8) {
+    let a = alpha as u32;
+    let inv = 255 - a;
+    for y in (center.y - radius)..=(center.y + radius) {
+        for x in (center.x - radius)..=(center.x + radius) {
+            if x < 0 || y < 0 || x >= canvas.width() as i32 || y >= canvas.height() as i32 {
+                continue;
+            }
+            let dx = x - center.x;
+            let dy = y - center.y;
+            if dx * dx + dy * dy > radius * radius {
+                continue;
+            }
+            let pixel = canvas.get_pixel_mut(x as u32, y as u32);
+            let data = pixel.0;
+            pixel.0 = [
+                ((color.0 as u32 * a + data[0] as u32 * inv) / 255) as u8,
+                ((color.1 as u32 * a + data[1] as u32 * inv) / 255) as u8,
+                ((color.2 as u32 * a + data[2] as u32 * inv) / 255) as u8,
+                255,
+            ];
+        }
+    }
 }
 
 fn render_strokes(base: &RgbaImage, strokes: &[Stroke], active: Option<&Stroke>) -> RgbaImage {
-    use imageproc::drawing::draw_filled_circle_mut;
-
     let mut canvas = base.clone();
     for stroke in strokes.iter().chain(active.into_iter()) {
         if stroke.points.is_empty() {
@@ -1384,11 +1412,10 @@ fn render_strokes(base: &RgbaImage, strokes: &[Stroke], active: Option<&Stroke>)
         }
         match stroke.tool {
             DrawTool::Pen => {
-                let color = color_rgba(stroke.color);
+                let color = color_rgb(stroke.color);
                 let radius = (stroke.width / 2).max(1);
                 if stroke.points.len() == 1 {
-                    let point = stroke.points[0];
-                    draw_filled_circle_mut(&mut canvas, (point.x, point.y), radius, color);
+                    paint_brush(&mut canvas, stroke.points[0], radius, color, stroke.alpha);
                 } else {
                     for pair in stroke.points.windows(2) {
                         let dx = pair[1].x - pair[0].x;
@@ -1398,7 +1425,7 @@ fn render_strokes(base: &RgbaImage, strokes: &[Stroke], active: Option<&Stroke>)
                             let t = index as f32 / steps as f32;
                             let x = pair[0].x + (dx as f32 * t).round() as i32;
                             let y = pair[0].y + (dy as f32 * t).round() as i32;
-                            draw_filled_circle_mut(&mut canvas, (x, y), radius, color);
+                            paint_brush(&mut canvas, POINT { x, y }, radius, color, stroke.alpha);
                         }
                     }
                 }
@@ -1800,7 +1827,6 @@ fn paint(hwnd: HWND) {
             {
                 if let Err(e) =
                     gdi::paint_overlay(hwnd, back, dimmed, original, selection_rect(state), |hdc| {
-                        draw_annotations(hdc, state)?;
                         draw_crosshair(back, state)?;
                         draw_handles(hdc, state)?;
                         draw_toolbar(hdc, state)
@@ -1893,7 +1919,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         .ok();
                         return LRESULT(0);
                     }
-                    if begin_stroke(hwnd, pt) {
+                    if begin_stroke(hwnd, pt, DrawTool::Pen) {
                         return LRESULT(0);
                     }
                     if pt.x >= selection.left
@@ -1914,7 +1940,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         return LRESULT(0);
                     }
                 }
-            } else if begin_stroke(hwnd, pt) {
+            } else if begin_stroke(hwnd, pt, DrawTool::Pen) {
                 return LRESULT(0);
             }
             let _ = SetCapture(hwnd);
@@ -1931,6 +1957,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 state.active_stroke = None;
                 state.strokes.clear();
                 state.redo.clear();
+                let _ = refresh_annotated(state);
                 state.start = Some(clamped);
                 state.end = Some(clamped);
                 Ok(())
@@ -1939,17 +1966,60 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             gdi::invalidate(hwnd);
             LRESULT(0)
         }
+        WM_RBUTTONDOWN => {
+            let pt = point_from_lparam(lparam);
+            let _ = begin_stroke(hwnd, pt, DrawTool::Eraser);
+            LRESULT(0)
+        }
+        WM_RBUTTONUP => {
+            let _ = ReleaseCapture();
+            release_cursor_clip();
+            if finish_stroke() {
+                gdi::invalidate(hwnd);
+                update_cursor(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16 as i32 / 120;
+            let mut point = POINT {
+                x: (lparam.0 & 0xffff) as u16 as i16 as i32,
+                y: ((lparam.0 >> 16) & 0xffff) as u16 as i16 as i32,
+            };
+            let _ = unsafe { ScreenToClient(hwnd, &mut point) };
+            let over_pen =
+                with_state(|state| toolbar_button_at(state, point) == Some(ToolbarButton::Pen))
+                    .unwrap_or(false);
+            if over_pen && delta != 0 {
+                let ctrl = active_modifiers() & MOD_CONTROL != 0;
+                let _ = with_state_mut(|state| {
+                    if ctrl {
+                        state.pen_alpha =
+                            (state.pen_alpha as i32 + delta * 20).clamp(30, 255) as u8;
+                    } else {
+                        let len = PEN_PALETTE.len() as i32;
+                        state.pen_color_index =
+                            (((state.pen_color_index as i32 - delta) % len + len) % len) as usize;
+                    }
+                    Ok(())
+                });
+                gdi::invalidate(hwnd);
+            }
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
             let pt = point_from_lparam(lparam);
             with_state_mut(|state| {
                 state.cursor = Some(pt);
                 if state.active_stroke.is_some() {
-                    let clamped = clamp_to_selection(state, pt);
-                    if let (Some(point), Some(stroke)) = (clamped, state.active_stroke.as_mut()) {
-                        if stroke.points.last() != Some(&point) {
-                            stroke.points.push(point);
+                    if let Some(point) = clamp_to_selection(state, pt) {
+                        if let Some(stroke) = state.active_stroke.as_mut() {
+                            if stroke.points.last() != Some(&point) {
+                                stroke.points.push(point);
+                            }
                         }
                     }
+                    let _ = refresh_annotated(state);
                     return Ok(());
                 }
                 if let Some(drag) = state.resize_drag {
@@ -2067,6 +2137,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::Rgba;
 
     #[test]
     fn first_capture_uses_the_foreground_app() {
@@ -2170,7 +2241,8 @@ mod tests {
         let base = RgbaImage::from_pixel(10, 10, Rgba([255, 255, 255, 255]));
         let stroke = Stroke {
             tool: DrawTool::Pen,
-            color: PEN_COLOR,
+            color: COLORREF(255 | (70 << 8) | (70 << 16)),
+            alpha: 255,
             width: 3,
             points: vec![POINT { x: 2, y: 5 }, POINT { x: 8, y: 5 }],
         };
@@ -2184,12 +2256,14 @@ mod tests {
         let pen = Stroke {
             tool: DrawTool::Pen,
             color: COLORREF(0 | (0 << 8) | (255 << 16)),
+            alpha: 255,
             width: 3,
             points: vec![POINT { x: 2, y: 5 }, POINT { x: 8, y: 5 }],
         };
         let eraser = Stroke {
             tool: DrawTool::Eraser,
             color: COLORREF(0),
+            alpha: 255,
             width: 10,
             points: vec![POINT { x: 5, y: 5 }, POINT { x: 5, y: 5 }],
         };

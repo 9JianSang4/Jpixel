@@ -100,6 +100,22 @@ impl Dib {
         Ok(dib)
     }
 
+    /// Replace the pixels of an existing DIB without reallocating GDI objects.
+    pub fn replace_from_rgba(&mut self, image: &RgbaImage) -> Result<()> {
+        if image.width() as i32 != self.width || image.height() as i32 != self.height {
+            return Err(anyhow!("DIB size mismatch"));
+        }
+        let len = (self.width as usize) * (self.height as usize) * 4;
+        let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, len) };
+        for (dst_px, src_px) in dst.chunks_exact_mut(4).zip(image.pixels()) {
+            dst_px[0] = src_px[2];
+            dst_px[1] = src_px[1];
+            dst_px[2] = src_px[0];
+            dst_px[3] = 255;
+        }
+        Ok(())
+    }
+
     pub fn dimmed_from_rgba(image: &RgbaImage) -> Result<Self> {
         let width = image.width() as i32;
         let height = image.height() as i32;
