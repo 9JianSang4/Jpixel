@@ -252,7 +252,7 @@
 
       <footer class="page-footer">
         <span>BUG 反馈：2025886838@qq.com</span>
-        <span>由见桑 &amp; Claude Code 制作</span>
+        <span>由 DeepSeek 制作</span>
       </footer>
     </main>
   </div>
