@@ -39,6 +39,12 @@
       <!-- 快捷键 -->
       <template v-if="activeSection === 'shortcuts'">
         <h2>快捷键</h2>
+        <div
+          v-if="hotkeyError"
+          style="margin: 0 32px 12px; padding: 10px 12px; border-radius: 8px; background: #fdecea; color: #a12622; font-size: 13px;"
+        >
+          {{ hotkeyError }}
+        </div>
       <div class="setting-group">
         <div class="setting-row">
           <div class="setting-info">
@@ -164,12 +170,13 @@ import { formatHotkey } from "../utils/hotkey";
 const activeSection = ref("general");
 const autoLaunch = ref(false);
 const doublePress = ref(false);
-const screenshotHotkey = ref("F1");
+const screenshotHotkey = ref("Alt+X");
 const copyHotkey = ref("Ctrl+C");
 const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
 const defaultAction = ref("save_and_edit");
 const recordingMode = ref<string | null>(null);
+const hotkeyError = ref<string | null>(null);
 
 const actionLabels: Record<string, string> = {
   save_and_edit: "保存并编辑",
@@ -243,10 +250,18 @@ function onKeyDown(e: KeyboardEvent, mode: string) {
   const entry = setters[mode];
   if (!entry) return;
 
-  entry.ref.value = hotkeyStr;
-  entry.setter(hotkeyStr).catch((err: unknown) => {
-    console.error(`Failed to set ${mode} hotkey:`, err);
-  });
+  const previous = entry.ref.value;
+  entry
+    .setter(hotkeyStr)
+    .then(() => {
+      entry.ref.value = hotkeyStr;
+      hotkeyError.value = null;
+    })
+    .catch((err: unknown) => {
+      entry.ref.value = previous;
+      hotkeyError.value = `快捷键设置失败：${String(err)}`;
+      console.error(`Failed to set ${mode} hotkey:`, err);
+    });
 }
 </script>
 

@@ -325,8 +325,11 @@ pub fn set_screenshot_hotkey(
     // overlay thread so the legacy WebView capture path is never opened.
     let parsed = crate::core::hotkey::parse(&hotkey)
         .map_err(|e| JpixelError::InvalidHotkey(format!("'{}': {}", hotkey, e)))?;
-    crate::overlay::change_hotkey(parsed.vk, parsed.mods, &parsed.name)
-        .map_err(|e| JpixelError::InvalidHotkey(e.to_string()))?;
+    log::info!("settings requested screenshot hotkey: {hotkey}");
+    crate::overlay::change_hotkey(parsed.vk, parsed.mods, &parsed.name).map_err(|e| {
+        log::warn!("settings hotkey change rejected: {e}");
+        JpixelError::InvalidHotkey(e.to_string())
+    })?;
 
     let mut cfg = lock_or_warn!(config);
     cfg.screenshot_hotkey = hotkey;
