@@ -9,6 +9,7 @@ use anyhow::{anyhow, Result};
 use image::RgbaImage;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -22,11 +23,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetSystemMetrics,
     GetWindowLongPtrW, GetWindowRect, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_DBLCLKS, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW,
-    LWA_ALPHA, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SetWindowLongPtrW, SetWindowPos, SetTimer, ShowWindow, CS_DBLCLKS, GWLP_USERDATA,
+    HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 const PIN_CLASS: PCWSTR = w!("JpixelPin");
@@ -36,6 +37,8 @@ const MAX_SCALE: f32 = 4.0;
 const SCALE_STEP: f32 = 0.1;
 const OPACITY_STEP: i32 = 26;
 const MIN_OPACITY: i32 = 26;
+const PIN_ANIM_MS: u64 = 150;
+const PIN_ANIM_TIMER_ID: usize = 0x61;
 
 static PIN_LIMIT: AtomicUsize = AtomicUsize::new(8);
 
@@ -78,12 +81,21 @@ pub fn apply_limit() {
     }
 }
 
+struct PinAnim {
+    from: RECT,
+    to: RECT,
+    from_scale: f32,
+    to_scale: f32,
+    start: Instant,
+}
+
 struct PinState {
     image: Dib,
     width: i32,
     height: i32,
     scale: f32,
     opacity: u8,
+    anim: Option<PinAnim>,
     dragging: bool,
     drag_cursor: POINT,
     drag_window: POINT,
@@ -154,6 +166,7 @@ pub fn create(image: RgbaImage, x: i32, y: i32) -> Result<()> {
             height,
             scale: 1.0,
             opacity: 255,
+            anim: None,
             dragging: false,
             drag_cursor: POINT::default(),
             drag_window: POINT::default(),
@@ -185,8 +198,23 @@ fn scaled_size(width: i32, height: i32, scale: f32) -> (i32, i32) {
     )
 }
 
-fn display_size(state: &PinState) -> (i32, i32) {
-    scaled_size(state.width, state.height, state.scale)
+fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn anim_progress(start: Instant) -> f32 {
+    (start.elapsed().as_millis() as f32 / PIN_ANIM_MS as f32).clamp(0.0, 1.0)
+}
+
+fn visual_scale(state: &PinState) -> f32 {
+    match state.anim.as_ref() {
+        Some(anim) => {
+            let t = ease_out_cubic(anim_progress(anim.start));
+            anim.from_scale + (anim.to_scale - anim.from_scale) * t
+        }
+        None => state.scale,
+    }
 }
 
 unsafe fn apply_opacity(hwnd: HWND, state: &mut PinState, opacity: i32) {
@@ -199,36 +227,67 @@ unsafe fn apply_opacity(hwnd: HWND, state: &mut PinState, opacity: i32) {
     );
 }
 
+unsafe fn finish_animation(hwnd: HWND, state: &mut PinState) {
+    let Some(anim) = state.anim.take() else {
+        return;
+    };
+    state.scale = anim.to_scale;
+    let _ = KillTimer(hwnd, PIN_ANIM_TIMER_ID);
+    let _ = SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        anim.to.left,
+        anim.to.top,
+        anim.to.right - anim.to.left,
+        anim.to.bottom - anim.to.top,
+        SWP_NOACTIVATE,
+    );
+    let _ = InvalidateRect(hwnd, None, false);
+}
+
 unsafe fn resize_pin(hwnd: HWND, state: &mut PinState, scale: f32, anchor: Option<POINT>) {
     let mut window = RECT::default();
     if GetWindowRect(hwnd, &mut window).is_err() {
         return;
     }
-    let old_scale = state.scale;
-    let (new_width, new_height) = scaled_size(state.width, state.height, scale);
+    let old_scale = visual_scale(state);
     let next_scale = scale.clamp(MIN_SCALE, MAX_SCALE);
+    let (new_width, new_height) = scaled_size(state.width, state.height, next_scale);
     let (left, top) = if let Some(cursor) = anchor {
         let source_x = ((cursor.x - window.left - PIN_BORDER) as f32 / old_scale)
             .clamp(0.0, state.width as f32);
         let source_y = ((cursor.y - window.top - PIN_BORDER) as f32 / old_scale)
             .clamp(0.0, state.height as f32);
         (
-            cursor.x - PIN_BORDER - (source_x * scale.clamp(MIN_SCALE, MAX_SCALE)).round() as i32,
-            cursor.y - PIN_BORDER - (source_y * scale.clamp(MIN_SCALE, MAX_SCALE)).round() as i32,
+            cursor.x - PIN_BORDER - (source_x * next_scale).round() as i32,
+            cursor.y - PIN_BORDER - (source_y * next_scale).round() as i32,
         )
     } else {
         (window.left, window.top)
     };
-    state.scale = next_scale;
-    let _ = SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
+    let target = RECT {
         left,
         top,
-        new_width + PIN_BORDER * 2,
-        new_height + PIN_BORDER * 2,
-        SWP_NOACTIVATE,
-    );
+        right: left + new_width + PIN_BORDER * 2,
+        bottom: top + new_height + PIN_BORDER * 2,
+    };
+    if target.left == window.left
+        && target.top == window.top
+        && target.right == window.right
+        && target.bottom == window.bottom
+    {
+        state.scale = next_scale;
+        return;
+    }
+    state.scale = next_scale;
+    state.anim = Some(PinAnim {
+        from: window,
+        to: target,
+        from_scale: old_scale,
+        to_scale: next_scale,
+        start: Instant::now(),
+    });
+    let _ = SetTimer(hwnd, PIN_ANIM_TIMER_ID, 16, None);
     let _ = InvalidateRect(hwnd, None, false);
 }
 
@@ -239,6 +298,43 @@ unsafe extern "system" fn pin_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
+        WM_TIMER if wparam.0 == PIN_ANIM_TIMER_ID => {
+            if let Some(state) = pin_state(hwnd) {
+                let Some(anim) = state.anim.as_ref() else {
+                    let _ = KillTimer(hwnd, PIN_ANIM_TIMER_ID);
+                    return LRESULT(0);
+                };
+                let t = ease_out_cubic(anim_progress(anim.start));
+                let rect = RECT {
+                    left: anim.from.left
+                        + ((anim.to.left - anim.from.left) as f32 * t).round() as i32,
+                    top: anim.from.top
+                        + ((anim.to.top - anim.from.top) as f32 * t).round() as i32,
+                    right: anim.from.right
+                        + ((anim.to.right - anim.from.right) as f32 * t).round() as i32,
+                    bottom: anim.from.bottom
+                        + ((anim.to.bottom - anim.from.bottom) as f32 * t).round() as i32,
+                };
+                let done = t >= 1.0;
+                let target_scale = anim.to_scale;
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_NOACTIVATE,
+                );
+                let _ = InvalidateRect(hwnd, None, false);
+                if done {
+                    state.anim = None;
+                    state.scale = target_scale;
+                    let _ = KillTimer(hwnd, PIN_ANIM_TIMER_ID);
+                }
+            }
+            LRESULT(0)
+        }
         WM_PAINT => {
             let mut paint = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut paint);
@@ -248,7 +344,10 @@ unsafe extern "system" fn pin_wndproc(
                 let background = CreateSolidBrush(rgb(24, 24, 27));
                 let _ = FillRect(hdc, &client, background);
                 let _ = DeleteObject(HGDIOBJ(background.0));
-                let (draw_width, draw_height) = display_size(state);
+                // The window itself is animated; always fill its current client
+                // area so position/size interpolation never leaves a gap.
+                let draw_width = (client.right - client.left - PIN_BORDER * 2).max(1);
+                let draw_height = (client.bottom - client.top - PIN_BORDER * 2).max(1);
                 let _ = SetStretchBltMode(hdc, HALFTONE);
                 let _ = SetBrushOrgEx(hdc, 0, 0, None);
                 let _ = StretchBlt(
@@ -274,6 +373,7 @@ unsafe extern "system" fn pin_wndproc(
         WM_ERASEBKGND => LRESULT(1),
         WM_LBUTTONDOWN => {
             if let Some(state) = pin_state(hwnd) {
+                finish_animation(hwnd, state);
                 SetFocus(hwnd);
                 SetCapture(hwnd);
                 let mut cursor = POINT::default();
