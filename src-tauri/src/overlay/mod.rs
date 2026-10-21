@@ -914,7 +914,17 @@ fn toolbar_outside_selection(selection: RECT, screen_w: i32, screen_h: i32, curr
 
 fn toolbar_rect(state: &OverlayState) -> Option<RECT> {
     if state.dragging {
-        return state.toolbar_freeze;
+        let freeze = state.toolbar_freeze?;
+        let Some(motion) = state.toolbar_motion else {
+            return Some(freeze);
+        };
+        let point = toolbar_motion_point(&motion, Instant::now());
+        return Some(RECT {
+            left: point.x,
+            top: point.y,
+            right: point.x + TOOLBAR_W,
+            bottom: point.y + TOOLBAR_H,
+        });
     }
     let target = toolbar_target_rect(state)?;
     let Some(motion) = state.toolbar_motion else {
@@ -2529,6 +2539,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let clamped = clamp_to_image(state, pt);
                 state.selection_pending_start = Some(clamped);
                 state.toolbar_freeze = frozen_toolbar;
+                state.toolbar_motion = None;
                 state.cursor = Some(pt);
                 state.hover_button = None;
                 state.resize_drag = None;
@@ -2689,12 +2700,34 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         state.image.as_ref(),
                     ) {
                         if rects_intersect(freeze, selection) {
-                            state.toolbar_freeze = Some(toolbar_outside_selection(
+                            let target = toolbar_outside_selection(
                                 selection,
                                 image.width() as i32,
                                 image.height() as i32,
                                 freeze,
-                            ));
+                            );
+                            if target.left != freeze.left
+                                || target.top != freeze.top
+                                || target.right != freeze.right
+                                || target.bottom != freeze.bottom
+                            {
+                                let from = toolbar_rect(state).unwrap_or(freeze);
+                                state.toolbar_freeze = Some(target);
+                                state.toolbar_motion = Some(ToolbarMotion {
+                                    from: POINT {
+                                        x: from.left,
+                                        y: from.top,
+                                    },
+                                    to: POINT {
+                                        x: target.left,
+                                        y: target.top,
+                                    },
+                                    start: Instant::now(),
+                                });
+                                unsafe {
+                                    let _ = SetTimer(state.hwnd, TOOLBAR_TIMER_ID, 16, None);
+                                }
+                            }
                         }
                     }
                     return Ok(());
@@ -2745,6 +2778,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             let was_adjusting = with_state_mut(|state| {
                 let adjusting = state.resize_drag.is_some() || state.move_drag.is_some();
+                let frozen_visual = if state.dragging {
+                    toolbar_rect(state)
+                } else {
+                    None
+                };
                 let frozen = state.toolbar_freeze.take();
                 state.resize_drag = None;
                 state.move_drag = None;
@@ -2761,10 +2799,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if let Some(frozen) = frozen {
                     state.toolbar_has_appeared = true;
                     if let Some(target) = toolbar_target_rect(state) {
+                        let from = frozen_visual.unwrap_or(frozen);
                         state.toolbar_motion = Some(ToolbarMotion {
                             from: POINT {
-                                x: frozen.left,
-                                y: frozen.top,
+                                x: from.left,
+                                y: from.top,
                             },
                             to: POINT {
                                 x: target.left,
