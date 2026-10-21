@@ -292,6 +292,7 @@ struct OverlayState {
     toolbar_has_appeared: bool,
     toolbar_freeze: Option<RECT>,
     toolbar_last: Option<RECT>,
+    selection_pending_start: Option<POINT>,
 }
 
 impl OverlayState {
@@ -336,6 +337,7 @@ impl OverlayState {
             toolbar_has_appeared: false,
             toolbar_freeze: None,
             toolbar_last: None,
+            selection_pending_start: None,
         }
     }
 }
@@ -734,6 +736,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.toolbar_has_appeared = false;
         state.toolbar_freeze = None;
         state.toolbar_last = None;
+        state.selection_pending_start = None;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -2103,6 +2106,7 @@ pub fn hide_overlay() {
         state.toolbar_has_appeared = false;
         state.toolbar_freeze = None;
         state.toolbar_last = None;
+        state.selection_pending_start = None;
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
@@ -2523,18 +2527,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     return Ok(());
                 }
                 let clamped = clamp_to_image(state, pt);
-                state.dragging = true;
+                state.selection_pending_start = Some(clamped);
                 state.toolbar_freeze = frozen_toolbar;
+                state.cursor = Some(pt);
                 state.hover_button = None;
                 state.resize_drag = None;
                 state.move_drag = None;
                 state.active_stroke = None;
-                state.strokes.clear();
-                state.redo.clear();
-                state.pending_pin_confirm = false;
-                let _ = rebuild_annotated(state);
-                state.start = Some(clamped);
-                state.end = Some(clamped);
                 Ok(())
             })
             .ok();
@@ -2630,6 +2629,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let pt = point_from_lparam(lparam);
             with_state_mut(|state| {
                 state.cursor = Some(pt);
+                if let Some(pending) = state.selection_pending_start {
+                    let dx = pt.x - pending.x;
+                    let dy = pt.y - pending.y;
+                    if dx * dx + dy * dy <= 9 {
+                        return Ok(());
+                    }
+                    state.selection_pending_start = None;
+                    state.dragging = true;
+                    state.start = Some(pending);
+                    state.end = Some(clamp_to_image(state, pt));
+                    state.active_stroke = None;
+                    state.strokes.clear();
+                    state.redo.clear();
+                    state.pending_pin_confirm = false;
+                    let _ = rebuild_annotated(state);
+                    return Ok(());
+                }
                 if state.active_stroke.is_some() {
                     let mut changed = false;
                     if let Some(point) = clamp_to_selection(state, pt) {
@@ -2710,6 +2726,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_LBUTTONUP => {
             let _ = ReleaseCapture();
             release_cursor_clip();
+            let pending = with_state(|state| state.selection_pending_start)
+                .unwrap_or(None);
+            if pending.is_some() {
+                let _ = with_state_mut(|state| {
+                    state.selection_pending_start = None;
+                    state.toolbar_freeze = None;
+                    Ok(())
+                });
+                gdi::invalidate(hwnd);
+                update_cursor(hwnd);
+                return LRESULT(0);
+            }
             if finish_stroke() {
                 gdi::invalidate(hwnd);
                 update_cursor(hwnd);
@@ -2765,6 +2793,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             release_cursor_clip();
             finish_stroke();
             with_state_mut(|state| {
+                state.selection_pending_start = None;
+                state.toolbar_freeze = None;
                 state.dragging = false;
                 state.hover_button = None;
                 state.resize_drag = None;
