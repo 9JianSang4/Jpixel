@@ -265,6 +265,7 @@ struct OverlayState {
     pen_color_index: usize,
     pen_alpha: u8,
     eraser_width: i32,
+    last_annotation_refresh: Option<Instant>,
 }
 
 impl OverlayState {
@@ -301,6 +302,7 @@ impl OverlayState {
             pen_color_index: 0,
             pen_alpha: 255,
             eraser_width: ERASER_WIDTH,
+            last_annotation_refresh: None,
         }
     }
 }
@@ -1063,6 +1065,7 @@ fn undo_stroke() {
             state.redo.push(stroke);
         }
         let _ = refresh_annotated(state);
+        state.last_annotation_refresh = Some(Instant::now());
         Ok(())
     });
     invalidate_overlay();
@@ -1074,6 +1077,7 @@ fn redo_stroke() {
             state.strokes.push(stroke);
         }
         let _ = refresh_annotated(state);
+        state.last_annotation_refresh = Some(Instant::now());
         Ok(())
     });
     invalidate_overlay();
@@ -1362,6 +1366,7 @@ fn begin_stroke(hwnd: HWND, point: POINT, tool: DrawTool) -> bool {
             segments: Vec::new(),
         });
         let _ = refresh_annotated(state);
+        state.last_annotation_refresh = Some(Instant::now());
         Ok(true)
     })
     .unwrap_or(false);
@@ -1381,6 +1386,7 @@ fn finish_stroke() -> bool {
                 state.strokes.push(stroke);
                 state.redo.clear();
                 let _ = refresh_annotated(state);
+        state.last_annotation_refresh = Some(Instant::now());
             }
             return Ok(true);
         }
@@ -2110,6 +2116,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 state.strokes.clear();
                 state.redo.clear();
                 let _ = refresh_annotated(state);
+        state.last_annotation_refresh = Some(Instant::now());
                 state.start = Some(clamped);
                 state.end = Some(clamped);
                 Ok(())
@@ -2172,6 +2179,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         }
                     }
                     let _ = refresh_annotated(state);
+        state.last_annotation_refresh = Some(Instant::now());
                     Ok(())
                 });
                 gdi::invalidate(hwnd);
@@ -2202,14 +2210,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_state_mut(|state| {
                 state.cursor = Some(pt);
                 if state.active_stroke.is_some() {
+                    let mut changed = false;
                     if let Some(point) = clamp_to_selection(state, pt) {
                         if let Some(stroke) = state.active_stroke.as_mut() {
                             if stroke.points.last() != Some(&point) {
                                 stroke.points.push(point);
+                                changed = true;
                             }
                         }
                     }
-                    let _ = refresh_annotated(state);
+                    let now = Instant::now();
+                    let due = state
+                        .last_annotation_refresh
+                        .map(|last| now.duration_since(last) >= Duration::from_millis(16))
+                        .unwrap_or(true);
+                    if changed && due && refresh_annotated(state).is_ok() {
+                        state.last_annotation_refresh = Some(Instant::now());
+                    }
                     return Ok(());
                 }
                 if let Some(drag) = state.resize_drag {
