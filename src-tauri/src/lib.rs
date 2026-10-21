@@ -58,10 +58,9 @@ fn setup_logging() {
 }
 
 fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
-    let capture_item = MenuItem::with_id(app, "capture", "截图", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&capture_item, &settings_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&settings_item, &quit_item])?;
 
     TrayIconBuilder::new()
         .icon(
@@ -80,7 +79,6 @@ fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
         .menu(&menu)
         .on_menu_event(|app: &AppHandle, event| {
             match event.id.as_ref() {
-                "capture" => overlay::trigger_capture(),
                 "settings" => {
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.show();
