@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use tauri::{AppHandle, Manager, State};
 use crate::error::JpixelError;
 
@@ -169,22 +168,10 @@ pub fn native_overlay_options(config: &AppConfig) -> crate::overlay::OverlayOpti
 }
 
 // ─────────────────────────────────────────────────────────────
-// Runtime state (not serialized)
-// ─────────────────────────────────────────────────────────────
-
-/// Transient hotkey state, separate from persisted config.
-#[derive(Debug, Default)]
-pub struct HotkeyState {
-    pub waiting_second_press: bool,
-    pub last_press_time: Option<Instant>,
-}
-
-// ─────────────────────────────────────────────────────────────
 // Shared state container
 // ─────────────────────────────────────────────────────────────
 
 pub type ConfigArc = Arc<Mutex<AppConfig>>;
-pub type StateArc = Arc<Mutex<HotkeyState>>;
 
 // ─────────────────────────────────────────────────────────────
 // Persistence helpers

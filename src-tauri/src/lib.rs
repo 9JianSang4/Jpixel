@@ -1,8 +1,6 @@
-use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_global_shortcut::ShortcutState;
+use tauri::{AppHandle, Manager};
 
 pub mod capture;
 mod bubble;
@@ -13,10 +11,9 @@ pub mod error;
 pub mod overlay;
 mod pin;
 mod round_rect;
-mod shortcut;
 mod window;
 
-use config::{load_config, ConfigArc, HotkeyState, StateArc};
+use config::{load_config, ConfigArc};
 
 // ─────────────────────────────────────────────────────────────
 // Single instance guard
@@ -40,63 +37,6 @@ fn ensure_single_instance() -> bool {
         std::mem::forget(instance);
         true
     }
-}
-
-// ─────────────────────────────────────────────────────────────
-// Hotkey handling
-// ─────────────────────────────────────────────────────────────
-
-fn handle_capture_hotkey(app: &AppHandle, config: &ConfigArc, state: &StateArc) {
-    let double_press = {
-        let cfg = config::lock_or_warn!(config);
-        cfg.double_press_enabled
-    };
-
-    log::debug!("Hotkey pressed, double_press_enabled={}", double_press);
-
-    if !double_press {
-        let app_clone = app.clone();
-        let _ = app.emit("trigger-capture", ());
-        std::thread::spawn(move || {
-            window::create_capture_window(app_clone);
-        });
-        return;
-    }
-
-    let should_trigger = {
-        let mut st = config::lock_or_warn!(state);
-        if st.waiting_second_press {
-            st.waiting_second_press = false;
-            st.last_press_time = None;
-            true
-        } else {
-            st.waiting_second_press = true;
-            st.last_press_time = Some(Instant::now());
-            false
-        }
-    };
-
-    if should_trigger {
-        let app_clone = app.clone();
-        let _ = app.emit("trigger-capture", ());
-        std::thread::spawn(move || {
-            window::create_capture_window(app_clone);
-        });
-        return;
-    }
-
-    // Start timeout thread for second press
-    let app_clone = app.clone();
-    let state_clone = state.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(500));
-        let mut st = config::lock_or_warn!(state_clone);
-        if st.waiting_second_press {
-            st.waiting_second_press = false;
-            st.last_press_time = None;
-            let _ = app_clone.emit("hotkey-timeout", ());
-        }
-    });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -192,22 +132,10 @@ pub fn run() {
     }
 
     let config: ConfigArc = ConfigArc::new(std::sync::Mutex::new(config::AppConfig::default()));
-    let hotkey_state: StateArc = StateArc::new(std::sync::Mutex::new(HotkeyState::default()));
-    let config_for_plugin = config.clone();
-    let state_for_plugin = hotkey_state.clone();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |app, _shortcut, event| {
-                    if event.state == ShortcutState::Pressed {
-                        handle_capture_hotkey(app, &config_for_plugin, &state_for_plugin);
-                    }
-                })
-                .build(),
-        )
         .plugin(tauri_plugin_dialog::init())
         .manage(config.clone())
-        .manage(hotkey_state.clone())
         .invoke_handler(tauri::generate_handler![
             // Window
             window::create_capture_window,

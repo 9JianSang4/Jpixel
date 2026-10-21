@@ -5,7 +5,6 @@
   "windows": ["main", "pin-*", "capture-*"],
   "permissions": [
     "core:default",
-    "global-shortcut:default",
     "dialog:default",
     "core:window:allow-start-dragging",
     "core:window:allow-set-size"
