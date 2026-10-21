@@ -18,11 +18,11 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, FindWindowExW, FindWindowW, GetClientRect,
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, RegisterClassW,
-    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETWORKAREA,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics,
+    GetWindowLongPtrW, KillTimer, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, CS_HREDRAW, CS_VREDRAW,
+    GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETWORKAREA,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     SW_SHOWNOACTIVATE, WM_DESTROY, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -75,19 +75,7 @@ pub fn register_class() -> Result<()> {
     Ok(())
 }
 
-unsafe fn notification_area() -> Option<RECT> {
-    let tray = FindWindowW(w!("Shell_TrayWnd"), None);
-    if tray.0 == 0 {
-        return None;
-    }
-    let notify = FindWindowExW(tray, None, w!("TrayNotifyWnd"), None);
-    let target = if notify.0 != 0 { notify } else { tray };
-    let mut rect = RECT::default();
-    GetWindowRect(target, &mut rect).ok()?;
-    Some(rect)
-}
-
-pub fn show_pin_limit(limit: usize) {
+pub fn show_pin_limit(limit: usize, anchor_x: i32, anchor_top: i32, anchor_bottom: i32) {
     let previous = BUBBLE_HWND.load(Ordering::SeqCst);
     if previous != 0 {
         unsafe {
@@ -119,28 +107,22 @@ pub fn show_pin_limit(limit: usize) {
         }
         let fallback_x = work.right - BUBBLE_WIDTH - 12;
         let fallback_y = work.bottom - BUBBLE_HEIGHT - 12;
-        let (x, target_y) = notification_area()
-            .map(|tray| {
-                let center_x = (tray.left + tray.right) / 2;
-                let mut x = center_x - BUBBLE_WIDTH / 2;
-                let mut y = if tray.top >= work.bottom - 4 {
-                    tray.top - BUBBLE_HEIGHT - 8
-                } else {
-                    tray.bottom + 8
-                };
-                if tray.left >= work.right - 4 {
-                    x = tray.left - BUBBLE_WIDTH - 8;
-                    y = (tray.top + tray.bottom) / 2 - BUBBLE_HEIGHT / 2;
-                } else if tray.right <= work.left + 4 {
-                    x = tray.right + 8;
-                    y = (tray.top + tray.bottom) / 2 - BUBBLE_HEIGHT / 2;
-                }
-                (
-                    x.clamp(work.left + 8, (work.right - BUBBLE_WIDTH - 8).max(work.left + 8)),
-                    y.clamp(work.top + 8, (work.bottom - BUBBLE_HEIGHT - 8).max(work.top + 8)),
-                )
-            })
-            .unwrap_or((fallback_x, fallback_y));
+        let min_x = work.left + 8;
+        let max_x = (work.right - BUBBLE_WIDTH - 8).max(min_x);
+        let min_y = work.top + 8;
+        let max_y = (work.bottom - BUBBLE_HEIGHT - 8).max(min_y);
+        let x = (anchor_x - BUBBLE_WIDTH / 2).clamp(min_x, max_x);
+        let above = anchor_top - BUBBLE_HEIGHT - 8 >= min_y;
+        let y = if above {
+            (anchor_top - BUBBLE_HEIGHT - 8).clamp(min_y, max_y)
+        } else {
+            (anchor_bottom + 8).clamp(min_y, max_y)
+        };
+        let (x, target_y) = if anchor_x == 0 && anchor_top == 0 {
+            (fallback_x, fallback_y)
+        } else {
+            (x, y)
+        };
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED
                 | WS_EX_TOOLWINDOW

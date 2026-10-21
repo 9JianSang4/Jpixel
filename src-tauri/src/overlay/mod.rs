@@ -1827,7 +1827,24 @@ fn pin_and_close() {
             state.pending_pin_confirm = true;
             Ok(())
         });
-        crate::bubble::show_pin_limit(crate::pin::limit());
+        let anchor = with_state(|state| {
+            let mut window = RECT::default();
+            let _ = unsafe { GetWindowRect(state.hwnd, &mut window) };
+            toolbar_button_rects(state)
+                .into_iter()
+                .find(|(button, _)| *button == ToolbarButton::Pin)
+                .map(|(_, rect)| {
+                    (
+                        window.left + (rect.left + rect.right) / 2,
+                        window.top + rect.top,
+                        window.top + rect.bottom,
+                    )
+                })
+        })
+        .ok()
+        .flatten()
+        .unwrap_or((0, 0, 0));
+        crate::bubble::show_pin_limit(crate::pin::limit(), anchor.0, anchor.1, anchor.2);
         log::info!("pin limit reached; waiting for confirmation");
         return;
     }
