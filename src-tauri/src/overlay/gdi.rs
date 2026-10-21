@@ -116,6 +116,40 @@ impl Dib {
         Ok(())
     }
 
+    /// Replace only a dirty rectangle of an existing DIB.
+    pub fn replace_region_from_rgba(
+        &mut self,
+        image: &RgbaImage,
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<()> {
+        if image.width() as i32 != self.width || image.height() as i32 != self.height {
+            return Err(anyhow!("DIB size mismatch"));
+        }
+        let left = left.max(0);
+        let top = top.max(0);
+        let right = (left + width.max(0)).min(self.width);
+        let bottom = (top + height.max(0)).min(self.height);
+        if right <= left || bottom <= top {
+            return Ok(());
+        }
+        let len = (self.width as usize) * (self.height as usize) * 4;
+        let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, len) };
+        for y in top..bottom {
+            for x in left..right {
+                let src = image.get_pixel(x as u32, y as u32);
+                let index = ((y as usize) * (self.width as usize) + x as usize) * 4;
+                dst[index] = src[2];
+                dst[index + 1] = src[1];
+                dst[index + 2] = src[0];
+                dst[index + 3] = 255;
+            }
+        }
+        Ok(())
+    }
+
     pub fn dimmed_from_rgba(image: &RgbaImage) -> Result<Self> {
         let width = image.width() as i32;
         let height = image.height() as i32;

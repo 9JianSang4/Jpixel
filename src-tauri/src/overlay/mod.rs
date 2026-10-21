@@ -265,7 +265,8 @@ struct OverlayState {
     pen_color_index: usize,
     pen_alpha: u8,
     eraser_width: i32,
-    last_annotation_refresh: Option<Instant>,
+    annotated: Option<RgbaImage>,
+    active_applied: usize,
 }
 
 impl OverlayState {
@@ -302,7 +303,8 @@ impl OverlayState {
             pen_color_index: 0,
             pen_alpha: 255,
             eraser_width: ERASER_WIDTH,
-            last_annotation_refresh: None,
+            annotated: None,
+            active_applied: 0,
         }
     }
 }
@@ -659,7 +661,9 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.back = Some(back);
         state.original = Some(original);
         state.dimmed = Some(dimmed);
+        state.annotated = Some(image.clone());
         state.image = Some(image);
+        state.active_applied = 0;
         state.start = None;
         state.end = None;
         state.dragging = false;
@@ -1064,8 +1068,7 @@ fn undo_stroke() {
         if let Some(stroke) = state.strokes.pop() {
             state.redo.push(stroke);
         }
-        let _ = refresh_annotated(state);
-        state.last_annotation_refresh = Some(Instant::now());
+        let _ = rebuild_annotated(state);
         Ok(())
     });
     invalidate_overlay();
@@ -1076,8 +1079,7 @@ fn redo_stroke() {
         if let Some(stroke) = state.redo.pop() {
             state.strokes.push(stroke);
         }
-        let _ = refresh_annotated(state);
-        state.last_annotation_refresh = Some(Instant::now());
+        let _ = rebuild_annotated(state);
         Ok(())
     });
     invalidate_overlay();
@@ -1317,13 +1319,125 @@ fn clamp_to_selection(state: &OverlayState, point: POINT) -> Option<POINT> {
     })
 }
 
-fn refresh_annotated(state: &mut OverlayState) -> Result<()> {
+fn rebuild_annotated(state: &mut OverlayState) -> Result<()> {
     let Some(base) = state.image.as_ref() else {
         return Ok(());
     };
-    let annotated = render_strokes(base, &state.strokes, state.active_stroke.as_ref());
+    let annotated = render_strokes(base, &state.strokes, None);
     if let Some(original) = state.original.as_mut() {
         original.replace_from_rgba(&annotated)?;
+    }
+    state.annotated = Some(annotated);
+    state.active_applied = 0;
+    Ok(())
+}
+
+fn union_rect(current: Option<RECT>, next: RECT) -> RECT {
+    match current {
+        Some(rect) => RECT {
+            left: rect.left.min(next.left),
+            top: rect.top.min(next.top),
+            right: rect.right.max(next.right),
+            bottom: rect.bottom.max(next.bottom),
+        },
+        None => next,
+    }
+}
+
+fn apply_brush_to_annotated(
+    state: &mut OverlayState,
+    tool: DrawTool,
+    width: i32,
+    color: COLORREF,
+    alpha: u8,
+    start: POINT,
+    end: POINT,
+) -> Result<RECT> {
+    let radius = (width / 2).max(1);
+    let step = if tool == DrawTool::Eraser {
+        (radius / 2).max(1)
+    } else {
+        1
+    };
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let steps = (dx.abs().max(dy.abs()).max(1) / step).max(1);
+    let rgb = color_rgb(color);
+
+    let OverlayState {
+        image, annotated, ..
+    } = state;
+    let base = image
+        .as_ref()
+        .ok_or_else(|| anyhow!("no base capture"))?;
+    let canvas = annotated
+        .as_mut()
+        .ok_or_else(|| anyhow!("no annotation canvas"))?;
+
+    let mut dirty: Option<RECT> = None;
+    for index in 0..=steps {
+        let t = index as f32 / steps as f32;
+        let cx = start.x + (dx as f32 * t).round() as i32;
+        let cy = start.y + (dy as f32 * t).round() as i32;
+        if tool == DrawTool::Pen {
+            paint_brush(canvas, POINT { x: cx, y: cy }, radius, rgb, alpha);
+        } else {
+            erase_brush(canvas, base, cx, cy, radius);
+        }
+        dirty = Some(union_rect(
+            dirty,
+            RECT {
+                left: cx - radius,
+                top: cy - radius,
+                right: cx + radius + 1,
+                bottom: cy + radius + 1,
+            },
+        ));
+    }
+    Ok(dirty.unwrap_or_default())
+}
+
+fn apply_active_points(state: &mut OverlayState) -> Result<()> {
+    let Some(stroke) = state.active_stroke.as_ref() else {
+        return Ok(());
+    };
+    let len = stroke.points.len();
+    if len <= state.active_applied {
+        return Ok(());
+    }
+    let tool = stroke.tool;
+    let width = stroke.width;
+    let color = stroke.color;
+    let alpha = stroke.alpha;
+
+    let mut dirty: Option<RECT> = None;
+    for index in state.active_applied..len {
+        let (start, end) = {
+            let stroke = state.active_stroke.as_ref().expect("active stroke checked");
+            let end = stroke.points[index];
+            let start = if index == 0 {
+                end
+            } else {
+                stroke.points[index - 1]
+            };
+            (start, end)
+        };
+        let rect = apply_brush_to_annotated(state, tool, width, color, alpha, start, end)?;
+        dirty = Some(union_rect(dirty, rect));
+    }
+    state.active_applied = len;
+    if let Some(dirty) = dirty {
+        if let Some(annotated) = state.annotated.as_ref() {
+            if let Some(original) = state.original.as_mut() {
+                original.replace_region_from_rgba(
+                    annotated,
+                    dirty.left,
+                    dirty.top,
+                    dirty.right - dirty.left,
+                    dirty.bottom - dirty.top,
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -1357,6 +1471,7 @@ fn begin_stroke(hwnd: HWND, point: POINT, tool: DrawTool) -> bool {
             }
             DrawTool::Eraser => (COLORREF(0), 255, state.eraser_width),
         };
+        state.active_applied = 0;
         state.active_stroke = Some(Stroke {
             tool,
             color,
@@ -1365,8 +1480,7 @@ fn begin_stroke(hwnd: HWND, point: POINT, tool: DrawTool) -> bool {
             points: vec![point],
             segments: Vec::new(),
         });
-        let _ = refresh_annotated(state);
-        state.last_annotation_refresh = Some(Instant::now());
+        let _ = apply_active_points(state);
         Ok(true)
     })
     .unwrap_or(false);
@@ -1381,13 +1495,13 @@ fn begin_stroke(hwnd: HWND, point: POINT, tool: DrawTool) -> bool {
 
 fn finish_stroke() -> bool {
     with_state_mut(|state| {
+        let _ = apply_active_points(state);
         if let Some(stroke) = state.active_stroke.take() {
             if !stroke.points.is_empty() {
                 state.strokes.push(stroke);
                 state.redo.clear();
-                let _ = refresh_annotated(state);
-        state.last_annotation_refresh = Some(Instant::now());
             }
+            state.active_applied = 0;
             return Ok(true);
         }
         Ok(false)
@@ -1468,14 +1582,15 @@ pub fn set_bench_selection() -> Result<()> {
 }
 
 fn cropped_selection() -> Result<(RgbaImage, RECT)> {
-    let (image, rect, strokes, active) = STATE.with(|cell| {
+    let (image, rect) = STATE.with(|cell| {
         let borrow = cell.borrow();
         let state = borrow
             .as_ref()
             .ok_or_else(|| anyhow!("overlay is not initialized"))?;
         let image = state
-            .image
+            .annotated
             .as_ref()
+            .or(state.image.as_ref())
             .ok_or_else(|| anyhow!("no capture available"))?;
         let rect = selection_rect(state).unwrap_or(RECT {
             left: 0,
@@ -1483,15 +1598,9 @@ fn cropped_selection() -> Result<(RgbaImage, RECT)> {
             right: image.width() as i32,
             bottom: image.height() as i32,
         });
-        Ok::<(RgbaImage, RECT, Vec<Stroke>, Option<Stroke>), anyhow::Error>((
-            image.clone(),
-            rect,
-            state.strokes.clone(),
-            state.active_stroke.clone(),
-        ))
+        Ok::<(RgbaImage, RECT), anyhow::Error>((image.clone(), rect))
     })?;
 
-    let image = render_strokes(&image, &strokes, active.as_ref());
     let x = rect.left.max(0) as u32;
     let y = rect.top.max(0) as u32;
     let w = (rect.right - rect.left).max(1) as u32;
@@ -2115,8 +2224,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 state.active_stroke = None;
                 state.strokes.clear();
                 state.redo.clear();
-                let _ = refresh_annotated(state);
-        state.last_annotation_refresh = Some(Instant::now());
+                let _ = rebuild_annotated(state);
                 state.start = Some(clamped);
                 state.end = Some(clamped);
                 Ok(())
@@ -2164,6 +2272,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let next = (state.eraser_width + delta * ERASER_WHEEL_STEP)
                         .clamp(ERASER_MIN_WIDTH, ERASER_MAX_WIDTH);
                     state.eraser_width = next;
+                    let mut applied_after_split = None;
                     if let Some(stroke) = state.active_stroke.as_mut() {
                         let old_width = stroke.width;
                         if old_width != next {
@@ -2174,12 +2283,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                                     points,
                                 });
                                 stroke.points = vec![last];
+                                applied_after_split = Some(1);
+                            } else {
+                                applied_after_split = Some(0);
                             }
                             stroke.width = next;
                         }
                     }
-                    let _ = refresh_annotated(state);
-        state.last_annotation_refresh = Some(Instant::now());
+                    if let Some(applied) = applied_after_split {
+                        state.active_applied = applied;
+                    }
                     Ok(())
                 });
                 gdi::invalidate(hwnd);
@@ -2219,13 +2332,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             }
                         }
                     }
-                    let now = Instant::now();
-                    let due = state
-                        .last_annotation_refresh
-                        .map(|last| now.duration_since(last) >= Duration::from_millis(16))
-                        .unwrap_or(true);
-                    if changed && due && refresh_annotated(state).is_ok() {
-                        state.last_annotation_refresh = Some(Instant::now());
+                    if changed {
+                        let _ = apply_active_points(state);
                     }
                     return Ok(());
                 }
