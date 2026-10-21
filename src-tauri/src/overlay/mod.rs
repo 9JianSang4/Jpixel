@@ -39,19 +39,23 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, ClipCursor, CreateWindowExW, DefWindowProcW, DispatchMessageW,
-    GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, LoadCursorW, MessageBoxW,
-    PostMessageW, PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowPos,
-    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW,
-    IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_SIZEALL, MB_ICONERROR, MB_OK, MSG,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY,
-    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_EX_TOOLWINDOW,
+    GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, KillTimer, LoadCursorW,
+    MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow,
+    SetTimer, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST,
+    IDC_ARROW, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_SIZEALL, MB_ICONERROR,
+    MB_OK, MSG, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CAPTURECHANGED,
+    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };
 
 const HOTKEY_ID: i32 = 0x4A50; // "JP"
 const WM_APP_SET_HOTKEY: u32 = 0x8001;
 const WM_APP_SET_OPTIONS: u32 = 0x8002;
+const WM_APP_PIN_LIMIT: u32 = 0x8003;
+const WM_APP_CONFIRM_PIN: u32 = 0x8004;
+const PREVIEW_TIMER_ID: usize = 0x51;
+const PREVIEW_ANIM_MS: u128 = 160;
 const CLASS_NAME: PCWSTR = w!("JpixelNativeOverlay");
 static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -73,6 +77,7 @@ impl KeyBinding {
 
 pub const DEFAULT_COPY_HOTKEY: KeyBinding = KeyBinding::new(0x43, MOD_CONTROL); // Ctrl+C
 pub const DEFAULT_SAVE_HOTKEY: KeyBinding = KeyBinding::new(0x53, MOD_CONTROL); // Ctrl+S
+pub const DEFAULT_PIN_HOTKEY: KeyBinding = KeyBinding::new(0x54, MOD_CONTROL); // Ctrl+T
 
 #[derive(Debug, Clone, Copy)]
 pub struct OverlayOptions {
@@ -82,6 +87,7 @@ pub struct OverlayOptions {
     pub double_press_window_ms: u64,
     pub copy_hotkey: KeyBinding,
     pub save_hotkey: KeyBinding,
+    pub pin_hotkey: KeyBinding,
 }
 
 impl Default for OverlayOptions {
@@ -93,6 +99,7 @@ impl Default for OverlayOptions {
             double_press_window_ms: 500,
             copy_hotkey: DEFAULT_COPY_HOTKEY,
             save_hotkey: DEFAULT_SAVE_HOTKEY,
+            pin_hotkey: DEFAULT_PIN_HOTKEY,
         }
     }
 }
@@ -104,6 +111,7 @@ static OPTIONS: Mutex<OverlayOptions> = Mutex::new(OverlayOptions {
     double_press_window_ms: 500,
     copy_hotkey: DEFAULT_COPY_HOTKEY,
     save_hotkey: DEFAULT_SAVE_HOTKEY,
+    pin_hotkey: DEFAULT_PIN_HOTKEY,
 });
 
 fn current_options() -> OverlayOptions {
@@ -267,6 +275,8 @@ struct OverlayState {
     eraser_width: i32,
     annotated: Option<RgbaImage>,
     active_applied: usize,
+    pending_pin_confirm: bool,
+    preview_start: Option<Instant>,
 }
 
 impl OverlayState {
@@ -305,6 +315,8 @@ impl OverlayState {
             eraser_width: ERASER_WIDTH,
             annotated: None,
             active_applied: 0,
+            pending_pin_confirm: false,
+            preview_start: None,
         }
     }
 }
@@ -419,6 +431,7 @@ fn run(hotkey: crate::core::hotkey::Hotkey) -> Result<()> {
     enable_per_monitor_v2();
     init()?;
     crate::pin::register_class()?;
+    crate::bubble::register_class()?;
     let monitors = monitor::enumerate()?;
     warm_up(&monitors);
     register_hotkey(hotkey.vk, hotkey.mods, &hotkey.name)?;
@@ -440,6 +453,25 @@ pub fn trigger_capture() {
     }
     unsafe {
         let _ = PostMessageW(HWND(raw), WM_HOTKEY, WPARAM(HOTKEY_ID as usize), LPARAM(0));
+    }
+}
+
+pub fn notify_pin_limit() {
+    let raw = OVERLAY_HWND.load(Ordering::SeqCst);
+    if raw != 0 {
+        unsafe {
+            let _ = PostMessageW(HWND(raw), WM_APP_PIN_LIMIT, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Tray click fallback for confirming a pin-limit replacement.
+pub fn trigger_pin_confirm() {
+    let raw = OVERLAY_HWND.load(Ordering::SeqCst);
+    if raw != 0 {
+        unsafe {
+            let _ = PostMessageW(HWND(raw), WM_APP_CONFIRM_PIN, WPARAM(0), LPARAM(0));
+        }
     }
 }
 
@@ -677,6 +709,8 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.strokes.clear();
         state.redo.clear();
         state.active_stroke = None;
+        state.pending_pin_confirm = false;
+        state.preview_start = None;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -891,12 +925,24 @@ fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
     else {
         return;
     };
-    let size = 24;
+    let progress = state
+        .preview_start
+        .map(|start| (start.elapsed().as_millis() as f32 / PREVIEW_ANIM_MS as f32).min(1.0))
+        .unwrap_or(1.0);
+    let eased = 1.0 - (1.0 - progress).powi(3);
+    let size = 16 + ((24 - 16) as f32 * eased).round() as i32;
     let left = pen_rect.left + (TOOLBAR_BUTTON_W - size) / 2;
-    let top = if toolbar.top - size - 10 >= 2 {
-        toolbar.top - size - 8
+    let above = toolbar.top - 24 - 10 >= 2;
+    let base_top = if above {
+        toolbar.top - 24 - 8
     } else {
         toolbar.bottom + 6
+    };
+    let slide = ((1.0 - eased) * 8.0).round() as i32;
+    let top = if above {
+        base_top + slide
+    } else {
+        base_top - slide
     };
     let (r, g, b) = pen_rgb(state);
     unsafe {
@@ -1775,6 +1821,17 @@ pub fn copy_current_selection() -> Result<CopyStats> {
 }
 
 fn pin_and_close() {
+    let confirmed = with_state(|state| state.pending_pin_confirm).unwrap_or(false);
+    if !confirmed && crate::pin::is_full() {
+        let _ = with_state_mut(|state| {
+            state.pending_pin_confirm = true;
+            Ok(())
+        });
+        crate::bubble::show_pin_limit(crate::pin::limit());
+        log::info!("pin limit reached; waiting for confirmation");
+        return;
+    }
+
     let result = (|| -> Result<()> {
         let (crop, rect) = cropped_selection()?;
         // Pinning also copies the same flattened image to the clipboard.
@@ -1800,6 +1857,10 @@ fn pin_and_close() {
     match result {
         Ok(()) => hide_overlay(),
         Err(e) => {
+            let _ = with_state_mut(|state| {
+                state.pending_pin_confirm = false;
+                Ok(())
+            });
             log::error!("pin failed: {e}");
             show_error(&format!("贴图失败：{e}"));
         }
@@ -1837,9 +1898,13 @@ fn report_current(note: &str, copy: Option<&CopyStats>) {
 /// pressed again to re-capture another monitor; `capture_monitor` reuses the
 /// original `prev_foreground` so the final close still restores the right app.
 fn hide_overlay_for_recapture() {
+    crate::bubble::dismiss();
     release_cursor_clip();
     let hwnd = with_state_mut(|state| {
         let hwnd = state.hwnd;
+        unsafe {
+            let _ = KillTimer(hwnd, PREVIEW_TIMER_ID);
+        }
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
@@ -1851,6 +1916,8 @@ fn hide_overlay_for_recapture() {
         state.strokes.clear();
         state.redo.clear();
         state.active_stroke = None;
+        state.pending_pin_confirm = false;
+        state.annotated = None;
         state.start = None;
         state.end = None;
         state.back = None;
@@ -1870,10 +1937,15 @@ fn hide_overlay_for_recapture() {
 }
 
 pub fn hide_overlay() {
+    crate::bubble::dismiss();
     release_cursor_clip();
     let (hwnd, prev) = with_state_mut(|state| {
         let hwnd = state.hwnd;
         let prev = state.prev_foreground;
+        unsafe {
+            let _ = KillTimer(hwnd, PREVIEW_TIMER_ID);
+        }
+        state.preview_start = None;
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
@@ -1885,6 +1957,8 @@ pub fn hide_overlay() {
         state.strokes.clear();
         state.redo.clear();
         state.active_stroke = None;
+        state.pending_pin_confirm = false;
+        state.annotated = None;
         state.start = None;
         state.end = None;
         state.back = None;
@@ -2192,6 +2266,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        WM_TIMER => {
+            if wparam.0 == PREVIEW_TIMER_ID {
+                let done = with_state(|state| {
+                    state
+                        .preview_start
+                        .map(|start| start.elapsed().as_millis() >= PREVIEW_ANIM_MS)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(true);
+                if done {
+                    unsafe {
+                        let _ = KillTimer(hwnd, PREVIEW_TIMER_ID);
+                    }
+                }
+                gdi::invalidate(hwnd);
+            }
+            LRESULT(0)
+        }
         WM_SETCURSOR => {
             update_cursor(hwnd);
             LRESULT(1)
@@ -2261,6 +2353,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 state.active_stroke = None;
                 state.strokes.clear();
                 state.redo.clear();
+                state.pending_pin_confirm = false;
                 let _ = rebuild_annotated(state);
                 state.start = Some(clamped);
                 state.end = Some(clamped);
@@ -2396,7 +2489,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     state.end = Some(clamp_to_image(state, pt));
                     return Ok(());
                 }
-                state.hover_button = toolbar_button_at(state, pt);
+                let previous = state.hover_button;
+                let next = toolbar_button_at(state, pt);
+                state.hover_button = next;
+                if next == Some(ToolbarButton::Pen) && previous != Some(ToolbarButton::Pen) {
+                    state.preview_start = Some(Instant::now());
+                    unsafe {
+                        let _ = SetTimer(state.hwnd, PREVIEW_TIMER_ID, 15, None);
+                    }
+                } else if previous == Some(ToolbarButton::Pen)
+                    && next != Some(ToolbarButton::Pen)
+                {
+                    state.preview_start = None;
+                    unsafe {
+                        let _ = KillTimer(state.hwnd, PREVIEW_TIMER_ID);
+                    }
+                }
                 Ok(())
             })
             .ok();
@@ -2460,6 +2568,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 copy_and_close();
             } else if options.save_hotkey.matches(key, mods) {
                 save_and_close();
+            } else if options.pin_hotkey.matches(key, mods) {
+                pin_and_close();
             }
             LRESULT(0)
         }
@@ -2469,6 +2579,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_APP_SET_OPTIONS => {
             gdi::invalidate(hwnd);
+            LRESULT(0)
+        }
+        WM_APP_PIN_LIMIT => {
+            crate::pin::apply_limit();
+            LRESULT(0)
+        }
+        WM_APP_CONFIRM_PIN => {
+            let pending = with_state(|state| state.pending_pin_confirm).unwrap_or(false);
+            if pending {
+                pin_and_close();
+            }
             LRESULT(0)
         }
         WM_HOTKEY => {

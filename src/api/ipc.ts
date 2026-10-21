@@ -167,6 +167,16 @@ export async function setPinHotkey(hotkey: string): Promise<void> {
   return invoke("set_pin_hotkey", { hotkey });
 }
 
+export type PinLimit = "four" | "eight" | "sixteen" | "thirty_two";
+
+export async function getPinLimit(): Promise<PinLimit> {
+  return invoke("get_pin_limit");
+}
+
+export async function setPinLimit(limit: PinLimit): Promise<void> {
+  return invoke("set_pin_limit", { value: limit });
+}
+
 export async function getAutoLaunch(): Promise<boolean> {
   return invoke("get_auto_launch");
 }

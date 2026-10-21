@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::{AppHandle, Manager, State};
 use crate::error::JpixelError;
-use crate::shortcut::parse_shortcut;
 
 // ─────────────────────────────────────────────────────────────
 // Pure configuration (serializable)
@@ -27,6 +26,8 @@ pub struct AppConfig {
     #[serde(default = "default_hotkey_ctrl_t")]
     pub pin_hotkey: String,
     #[serde(default)]
+    pub pin_limit: PinLimit,
+    #[serde(default)]
     pub auto_launch: bool,
     #[serde(default)]
     pub default_action: DefaultAction,
@@ -48,6 +49,32 @@ fn default_hotkey_alt_x() -> String {
 fn default_hotkey_ctrl_c() -> String { "Ctrl+C".to_string() }
 fn default_hotkey_ctrl_s() -> String { "Ctrl+S".to_string() }
 fn default_hotkey_ctrl_t() -> String { "Ctrl+T".to_string() }
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PinLimit {
+    Four,
+    Eight,
+    Sixteen,
+    ThirtyTwo,
+}
+
+impl PinLimit {
+    pub fn count(self) -> usize {
+        match self {
+            PinLimit::Four => 4,
+            PinLimit::Eight => 8,
+            PinLimit::Sixteen => 16,
+            PinLimit::ThirtyTwo => 32,
+        }
+    }
+}
+
+impl Default for PinLimit {
+    fn default() -> Self {
+        PinLimit::Eight
+    }
+}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DefaultAction {
@@ -110,6 +137,7 @@ impl Default for AppConfig {
             copy_hotkey: "Ctrl+C".to_string(),
             save_hotkey: "Ctrl+S".to_string(),
             pin_hotkey: "Ctrl+T".to_string(),
+            pin_limit: PinLimit::Eight,
             auto_launch: false,
             default_action: DefaultAction::SaveAndEdit,
             crosshair_guides: true,
@@ -134,6 +162,7 @@ pub fn native_overlay_options(config: &AppConfig) -> crate::overlay::OverlayOpti
         double_press_window_ms: config.double_press_speed.window_ms(),
         copy_hotkey: overlay_binding(&config.copy_hotkey, crate::overlay::DEFAULT_COPY_HOTKEY),
         save_hotkey: overlay_binding(&config.save_hotkey, crate::overlay::DEFAULT_SAVE_HOTKEY),
+        pin_hotkey: overlay_binding(&config.pin_hotkey, crate::overlay::DEFAULT_PIN_HOTKEY),
     }
 }
 
@@ -279,6 +308,7 @@ config_getter!(get_screenshot_hotkey, screenshot_hotkey, String);
 config_getter!(get_copy_hotkey, copy_hotkey, String);
 config_getter!(get_save_hotkey, save_hotkey, String);
 config_getter!(get_pin_hotkey, pin_hotkey, String);
+config_getter!(get_pin_limit, pin_limit, PinLimit);
 
 config_getter!(get_default_action, default_action, DefaultAction);
 config_setter!(set_default_action, default_action, DefaultAction);
@@ -505,12 +535,27 @@ pub fn set_pin_hotkey(
     config: State<ConfigArc>,
     hotkey: String,
 ) -> Result<(), JpixelError> {
-    let _ = parse_shortcut(&hotkey)
+    crate::core::hotkey::parse(&hotkey)
         .map_err(|e| JpixelError::InvalidHotkey(format!("'{}': {}", hotkey, e)))?;
     let mut cfg = lock_or_warn!(config);
     cfg.pin_hotkey = hotkey;
     let clone = cfg.clone();
     drop(cfg);
+    crate::overlay::set_options(native_overlay_options(&clone));
+    save_config(&app, &clone)
+}
+
+#[tauri::command]
+pub fn set_pin_limit(
+    app: AppHandle,
+    config: State<ConfigArc>,
+    value: PinLimit,
+) -> Result<(), JpixelError> {
+    let mut cfg = lock_or_warn!(config);
+    cfg.pin_limit = value;
+    let clone = cfg.clone();
+    drop(cfg);
+    crate::pin::set_limit(value.count());
     save_config(&app, &clone)
 }
 
@@ -527,7 +572,16 @@ mod tests {
         assert_eq!(cfg.copy_hotkey, "Ctrl+C");
         assert_eq!(cfg.save_hotkey, "Ctrl+S");
         assert_eq!(cfg.pin_hotkey, "Ctrl+T");
+        assert_eq!(cfg.pin_limit, PinLimit::Eight);
         assert_eq!(cfg.default_action, DefaultAction::SaveAndEdit);
+    }
+
+    #[test]
+    fn pin_limit_has_four_levels() {
+        assert_eq!(PinLimit::Four.count(), 4);
+        assert_eq!(PinLimit::Eight.count(), 8);
+        assert_eq!(PinLimit::Sixteen.count(), 16);
+        assert_eq!(PinLimit::ThirtyTwo.count(), 32);
     }
 
     #[test]

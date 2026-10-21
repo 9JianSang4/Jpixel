@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::ShortcutState;
 
 pub mod capture;
+mod bubble;
 pub mod clipboard;
 mod config;
 pub mod core;
@@ -134,6 +135,7 @@ fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
                 .clone(),
         )
         .tooltip("Jpixel")
+        .show_menu_on_left_click(false)
         .menu(&menu)
         .on_menu_event(|app: &AppHandle, event| {
             match event.id.as_ref() {
@@ -148,8 +150,15 @@ fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
                 _ => {}
             }
         })
-        .on_tray_icon_event(|_tray, _event| {
-            // Intentionally no-op: screenshot is triggered only by hotkey.
+        .on_tray_icon_event(|_tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                overlay::trigger_pin_confirm();
+            }
         })
         .build(app)?;
 
@@ -225,6 +234,8 @@ pub fn run() {
             config::set_save_hotkey,
             config::get_pin_hotkey,
             config::set_pin_hotkey,
+            config::get_pin_limit,
+            config::set_pin_limit,
             config::get_auto_launch,
             config::set_auto_launch,
             config::get_crosshair_guides,
@@ -266,6 +277,7 @@ pub fn run() {
             };
             let native_options = {
                 let cfg = config::lock_or_warn!(config);
+                pin::set_limit(cfg.pin_limit.count());
                 config::native_overlay_options(&cfg)
             };
             if let Err(e) = overlay::start(&native_hotkey, native_options) {

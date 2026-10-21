@@ -104,6 +104,19 @@
 
         <div class="setting-row">
           <div class="setting-info">
+            <div class="setting-label">贴图数量上限</div>
+            <p class="setting-desc">同时保留的贴图数量；超出时会提示你确认替换最早的一张。</p>
+          </div>
+          <SettingsSelect
+            v-model="pinLimit"
+            :options="pinLimitOptions"
+            aria-label="贴图数量上限"
+            @change="onPinLimitChange"
+          />
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
             <div class="setting-label">默认操作</div>
             <p class="setting-desc">双击或按 Enter 时执行的操作。</p>
           </div>
@@ -305,6 +318,8 @@ import {
   setSaveHotkey,
   getPinHotkey,
   setPinHotkey,
+  getPinLimit,
+  setPinLimit,
   getDefaultAction,
   setDefaultAction,
   getCrosshairGuides,
@@ -315,6 +330,7 @@ import {
   setDoublePressSpeed,
   type SelectionMode,
   type DoublePressSpeed,
+  type PinLimit,
 } from "../api/ipc";
 import { formatHotkey } from "../utils/hotkey";
 import SettingsSelect from "../components/SettingsSelect.vue";
@@ -331,6 +347,7 @@ const defaultAction = ref("save_and_edit");
 const crosshairGuides = ref(true);
 const selectionMode = ref("reselect");
 const doublePressSpeed = ref("normal");
+const pinLimit = ref("eight");
 const recordingMode = ref<string | null>(null);
 const hotkeyError = ref<string | null>(null);
 
@@ -357,6 +374,13 @@ const doublePressSpeedOptions = [
   { value: "fast", label: "快（300ms）" },
 ];
 
+const pinLimitOptions = [
+  { value: "four", label: "4 张" },
+  { value: "eight", label: "8 张" },
+  { value: "sixteen", label: "16 张" },
+  { value: "thirty_two", label: "32 张" },
+];
+
 function hotkeyKeys(value: string): string[] {
   return value
     .split("+")
@@ -376,6 +400,7 @@ onMounted(async () => {
     crosshairGuides.value = await getCrosshairGuides();
     selectionMode.value = await getSelectionMode();
     doublePressSpeed.value = await getDoublePressSpeed();
+    pinLimit.value = await getPinLimit();
   } catch (e) {
     console.error("Failed to load settings:", e);
   }
@@ -414,6 +439,12 @@ function onSelectionModeChange() {
 function onDoublePressSpeedChange() {
   setDoublePressSpeed(doublePressSpeed.value as DoublePressSpeed).catch((err: unknown) => {
     console.error("Failed to set double press speed:", err);
+  });
+}
+
+function onPinLimitChange() {
+  setPinLimit(pinLimit.value as PinLimit).catch((err: unknown) => {
+    console.error("Failed to set pin limit:", err);
   });
 }
 

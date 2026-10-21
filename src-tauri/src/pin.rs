@@ -7,6 +7,8 @@
 use crate::overlay::gdi::Dib;
 use anyhow::{anyhow, Result};
 use image::RgbaImage;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -26,6 +28,47 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const PIN_CLASS: PCWSTR = w!("JpixelPin");
 const PIN_BORDER: i32 = 1;
+
+static PIN_LIMIT: AtomicUsize = AtomicUsize::new(8);
+
+thread_local! {
+    /// Creation order, oldest first. Only touched on the overlay thread.
+    static PINS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn set_limit(limit: usize) {
+    PIN_LIMIT.store(limit.max(1), Ordering::SeqCst);
+    crate::overlay::notify_pin_limit();
+}
+
+pub fn is_full() -> bool {
+    let limit = PIN_LIMIT.load(Ordering::SeqCst).max(1);
+    PINS.with(|pins| pins.borrow().len() >= limit)
+}
+
+pub fn limit() -> usize {
+    PIN_LIMIT.load(Ordering::SeqCst).max(1)
+}
+
+pub fn apply_limit() {
+    let limit = PIN_LIMIT.load(Ordering::SeqCst).max(1);
+    loop {
+        let oldest = PINS.with(|pins| {
+            let mut pins = pins.borrow_mut();
+            if pins.len() > limit {
+                Some(pins.remove(0))
+            } else {
+                None
+            }
+        });
+        let Some(hwnd) = oldest else {
+            break;
+        };
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+}
 
 struct PinState {
     image: Dib,
@@ -104,8 +147,10 @@ pub fn create(image: RgbaImage, x: i32, y: i32) -> Result<()> {
             drag_window: POINT::default(),
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
+        PINS.with(|pins| pins.borrow_mut().push(hwnd));
         ShowWindow(hwnd, SW_SHOW);
         windows::Win32::Graphics::Gdi::UpdateWindow(hwnd);
+        apply_limit();
     }
     Ok(())
 }
@@ -216,6 +261,9 @@ unsafe extern "system" fn pin_wndproc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            PINS.with(|pins| {
+                pins.borrow_mut().retain(|pin| *pin != hwnd);
+            });
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PinState;
             if !ptr.is_null() {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
