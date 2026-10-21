@@ -1528,8 +1528,14 @@ fn paint_brush(canvas: &mut RgbaImage, center: POINT, radius: i32, color: (u8, u
 }
 
 fn erase_brush(canvas: &mut RgbaImage, base: &RgbaImage, cx: i32, cy: i32, radius: i32) {
+    let radius_sq = radius * radius;
     for y in (cy - radius)..=(cy + radius) {
         for x in (cx - radius)..=(cx + radius) {
+            let dx = x - cx;
+            let dy = y - cy;
+            if dx * dx + dy * dy > radius_sq {
+                continue;
+            }
             if x >= 0 && y >= 0 && x < canvas.width() as i32 && y < canvas.height() as i32 {
                 let pixel = *base.get_pixel(x as u32, y as u32);
                 canvas.put_pixel(x as u32, y as u32, pixel);
@@ -2453,6 +2459,16 @@ mod tests {
         };
         let rendered = render_strokes(&base, &[pen, eraser], None);
         assert_eq!(rendered.get_pixel(5, 5), &Rgba([255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn eraser_brush_is_circular() {
+        let base = RgbaImage::from_pixel(12, 12, Rgba([0, 255, 0, 255]));
+        let mut canvas = RgbaImage::from_pixel(12, 12, Rgba([255, 0, 0, 255]));
+        erase_brush(&mut canvas, &base, 5, 5, 5);
+        assert_eq!(canvas.get_pixel(5, 5), &Rgba([0, 255, 0, 255]));
+        // Square-corner pixel: distance sqrt(32) > 5, so it must remain untouched.
+        assert_eq!(canvas.get_pixel(9, 9), &Rgba([255, 0, 0, 255]));
     }
 
     #[test]
