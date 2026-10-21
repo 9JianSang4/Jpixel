@@ -8,9 +8,11 @@ use crate::config::SelectionMode;
 use crate::core::monitor::{self, MonitorInfo};
 use anyhow::{anyhow, Result};
 use arboard::{Clipboard, ImageData};
-use image::{ImageFormat, RgbaImage};
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::{ColorType, ImageEncoder, RgbaImage};
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{mpsc, Mutex};
@@ -19,11 +21,11 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
-    GetStockObject, LineTo, MoveToEx, RoundRect, ScreenToClient, SelectObject, SetBkMode,
-    SetTextColor, UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_DOT, TRANSPARENT,
+    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
+    GetStockObject, RoundRect, ScreenToClient, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER,
+    DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_PEN, OUT_DEFAULT_PRECIS,
+    PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -956,23 +958,19 @@ fn move_selection(rect: RECT, delta: POINT, bounds: RECT) -> RECT {
     }
 }
 
-fn draw_crosshair(hdc: HDC, state: &OverlayState) -> Result<()> {
+fn draw_crosshair(back: &Dib, state: &OverlayState) -> Result<()> {
     if !current_options().crosshair_guides {
         return Ok(());
     }
     let (Some(point), Some(bounds)) = (state.cursor, image_bounds(state)) else {
         return Ok(());
     };
-    unsafe {
-        let pen = CreatePen(PS_DOT, 1, rgb(64, 190, 255));
-        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
-        let _ = MoveToEx(hdc, bounds.left, point.y, None);
-        let _ = LineTo(hdc, bounds.right, point.y);
-        let _ = MoveToEx(hdc, point.x, bounds.top, None);
-        let _ = LineTo(hdc, point.x, bounds.bottom);
-        SelectObject(hdc, old_pen);
-        let _ = DeleteObject(HGDIOBJ(pen.0));
-    }
+    // Soft, low-contrast guides so they help alignment without dominating the
+    // frozen image. Alpha blending is done directly in the BGRA back buffer.
+    let color = (190, 205, 220);
+    let alpha = 55;
+    back.blend_hline(point.y, bounds.left, bounds.right, color, alpha);
+    back.blend_vline(point.x, bounds.top, bounds.bottom, color, alpha);
     Ok(())
 }
 
@@ -983,7 +981,7 @@ fn draw_handles(hdc: HDC, state: &OverlayState) -> Result<()> {
     unsafe {
         let brush = CreateSolidBrush(rgb(255, 255, 255));
         for (_, rect) in selection_handle_rects(state) {
-            let _ = windows::Win32::Graphics::Gdi::FillRect(hdc, &rect, brush);
+            let _ = FillRect(hdc, &rect, brush);
         }
         let _ = DeleteObject(HGDIOBJ(brush.0));
     }
@@ -1167,6 +1165,9 @@ fn hide_overlay_for_recapture() {
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
+        state.cursor = None;
+        state.resize_drag = None;
+        state.move_drag = None;
         state.start = None;
         state.end = None;
         state.back = None;
@@ -1193,6 +1194,9 @@ pub fn hide_overlay() {
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
+        state.cursor = None;
+        state.resize_drag = None;
+        state.move_drag = None;
         state.start = None;
         state.end = None;
         state.back = None;
@@ -1276,9 +1280,28 @@ fn save_current_selection() -> Result<Option<PathBuf>> {
         return Ok(None);
     };
     let path = ensure_png_extension(path);
-    image
-        .save_with_format(&path, ImageFormat::Png)
+    let started = Instant::now();
+    let mut file = File::create(&path).map_err(|e| anyhow!("create PNG failed: {e}"))?;
+    let encoder = PngEncoder::new_with_quality(
+        &mut file,
+        CompressionType::Fast,
+        FilterType::NoFilter,
+    );
+    encoder
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            ColorType::Rgba8,
+        )
         .map_err(|e| anyhow!("save PNG failed: {e}"))?;
+    file.sync_all()
+        .map_err(|e| anyhow!("flush PNG failed: {e}"))?;
+    log::info!(
+        "native PNG written in {:.0}ms: {}",
+        started.elapsed().as_secs_f64() * 1000.0,
+        path.display()
+    );
     Ok(Some(path))
 }
 
@@ -1383,7 +1406,7 @@ fn paint(hwnd: HWND) {
             {
                 if let Err(e) =
                     gdi::paint_overlay(hwnd, back, dimmed, original, selection_rect(state), |hdc| {
-                        draw_crosshair(hdc, state)?;
+                        draw_crosshair(back, state)?;
                         draw_handles(hdc, state)?;
                         draw_toolbar(hdc, state)
                     })
@@ -1514,14 +1537,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_MOUSEMOVE => {
             let pt = point_from_lparam(lparam);
-            let changed = with_state_mut(|state| {
+            with_state_mut(|state| {
                 state.cursor = Some(pt);
                 if let Some(drag) = state.resize_drag {
                     if let Some(bounds) = image_bounds(state) {
                         let next = resize_selection(drag.start_rect, drag.handle, pt, bounds);
                         set_selection(state, next);
                     }
-                    return Ok(true);
+                    return Ok(());
                 }
                 if let Some(drag) = state.move_drag {
                     if let Some(bounds) = image_bounds(state) {
@@ -1532,23 +1555,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         let next = move_selection(drag.start_rect, delta, bounds);
                         set_selection(state, next);
                     }
-                    return Ok(true);
+                    return Ok(());
                 }
                 if state.dragging {
                     state.end = Some(clamp_to_image(state, pt));
-                    return Ok(true);
+                    return Ok(());
                 }
-                let hover = toolbar_button_at(state, pt);
-                if state.hover_button == hover {
-                    return Ok(false);
-                }
-                state.hover_button = hover;
-                Ok(true)
+                state.hover_button = toolbar_button_at(state, pt);
+                Ok(())
             })
-            .unwrap_or(false);
-            if changed {
-                gdi::invalidate(hwnd);
-            }
+            .ok();
+            // Always repaint on mouse movement: the crosshair guide must track
+            // the cursor even when no selection/toolbar state changed.
+            gdi::invalidate(hwnd);
             LRESULT(0)
         }
         WM_LBUTTONUP => {

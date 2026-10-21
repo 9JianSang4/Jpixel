@@ -20,6 +20,14 @@ use windows::Win32::Graphics::Gdi::{
 
 const DIM_FACTOR: f32 = 0.55;
 
+fn blend_at(dst: &mut [u8], offset: usize, color: (u8, u8, u8), alpha: u8) {
+    let a = alpha as u32;
+    let inv = 255 - a;
+    dst[offset] = ((color.2 as u32 * a + dst[offset] as u32 * inv) / 255) as u8;
+    dst[offset + 1] = ((color.1 as u32 * a + dst[offset + 1] as u32 * inv) / 255) as u8;
+    dst[offset + 2] = ((color.0 as u32 * a + dst[offset + 2] as u32 * inv) / 255) as u8;
+}
+
 fn color(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(r as u32 | ((g as u32) << 8) | ((b as u32) << 16))
 }
@@ -113,6 +121,42 @@ impl Dib {
 
     pub fn hdc(&self) -> HDC {
         self.hdc
+    }
+
+    /// Blend a horizontal 1px line into this BGRA DIB. Used for the soft
+    /// crosshair guides; GDI pens cannot express per-pixel alpha here.
+    pub fn blend_hline(&self, y: i32, x0: i32, x1: i32, color: (u8, u8, u8), alpha: u8) {
+        if y < 0 || y >= self.height || x1 <= x0 {
+            return;
+        }
+        let start = x0.max(0).min(self.width);
+        let end = x1.max(0).min(self.width);
+        if end <= start {
+            return;
+        }
+        let stride = self.width as usize * 4;
+        let row = y as usize * stride;
+        let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, stride * self.height as usize) };
+        for x in start..end {
+            blend_at(dst, row + x as usize * 4, color, alpha);
+        }
+    }
+
+    /// Blend a vertical 1px line into this BGRA DIB.
+    pub fn blend_vline(&self, x: i32, y0: i32, y1: i32, color: (u8, u8, u8), alpha: u8) {
+        if x < 0 || x >= self.width || y1 <= y0 {
+            return;
+        }
+        let start = y0.max(0).min(self.height);
+        let end = y1.max(0).min(self.height);
+        if end <= start {
+            return;
+        }
+        let stride = self.width as usize * 4;
+        let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, stride * self.height as usize) };
+        for y in start..end {
+            blend_at(dst, y as usize * stride + x as usize * 4, color, alpha);
+        }
     }
 
     pub fn blank(width: i32, height: i32) -> Result<Self> {
