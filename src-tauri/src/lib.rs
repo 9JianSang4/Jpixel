@@ -1,5 +1,6 @@
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 mod bubble;
@@ -109,6 +110,13 @@ fn show_settings_window(app: &AppHandle) {
         .resizable(false)
         .maximizable(false)
         .center()
+        .visible(false)
+        .on_page_load(|window, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        })
         .build()
     {
         Ok(window) => {
@@ -119,8 +127,6 @@ fn show_settings_window(app: &AppHandle) {
                     let _ = win_hide.hide();
                 }
             });
-            let _ = window.show();
-            let _ = window.set_focus();
         }
         Err(e) => log::error!("failed to create settings window: {e}"),
     }

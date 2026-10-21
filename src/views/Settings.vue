@@ -34,6 +34,18 @@
           </svg>
           <span>快捷键</span>
         </button>
+        <button
+          type="button"
+          class="nav-item"
+          :class="{ active: activeSection === 'features' }"
+          @click="activeSection = 'features'"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 10.5v6M12 7.2h.01" />
+          </svg>
+          <span>功能介绍</span>
+        </button>
       </nav>
 
       <div class="sidebar-footer">v{{ version }}</div>
@@ -41,14 +53,8 @@
 
     <main class="content">
       <header class="page-header">
-        <h1>{{ activeSection === "general" ? "常规" : "快捷键" }}</h1>
-        <p>
-          {{
-            activeSection === "general"
-              ? "管理 Jpixel 的启动与基础行为。"
-              : "点击键帽后直接按下新的组合键，立即生效。"
-          }}
-        </p>
+        <h1>{{ sectionMeta.title }}</h1>
+        <p>{{ sectionMeta.description }}</p>
       </header>
 
       <section v-if="activeSection === 'general'" class="settings-card">
@@ -295,6 +301,20 @@
 
       </template>
 
+      <section v-if="activeSection === 'features'" class="settings-card feature-card">
+        <div class="card-header">
+          <h2>Jpixel 能做什么</h2>
+          <p>原生截图、轻量标注、贴图与快捷操作。</p>
+        </div>
+        <div class="feature-grid">
+          <article v-for="(item, index) in features" :key="item.title" class="feature-item">
+            <span class="feature-index">{{ String(index + 1).padStart(2, "0") }}</span>
+            <h3>{{ item.title }}</h3>
+            <p>{{ item.description }}</p>
+          </article>
+        </div>
+      </section>
+
       <footer class="page-footer">
         <span>BUG 反馈：2025886838@qq.com</span>
         <span>由见桑 &amp; DeepSeek 制作</span>
@@ -304,7 +324,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import {
   getAutoLaunch,
   setAutoLaunch,
@@ -335,8 +355,55 @@ import {
 import { formatHotkey } from "../utils/hotkey";
 import SettingsSelect from "../components/SettingsSelect.vue";
 
-const version = "1.2.0";
+const version = "2.0.0";
 const activeSection = ref("general");
+
+const sectionMeta = computed(() => {
+  switch (activeSection.value) {
+    case "shortcuts":
+      return {
+        title: "快捷键",
+        description: "点击键帽后直接按下新的组合键，立即生效。",
+      };
+    case "features":
+      return {
+        title: "功能介绍",
+        description: "快速了解 Jpixel 的截图、标注、输出和贴图能力。",
+      };
+    default:
+      return {
+        title: "常规",
+        description: "管理 Jpixel 的启动与基础行为。",
+      };
+  }
+});
+
+const features = [
+  {
+    title: "快速截图",
+    description: "Alt+X 冻结当前屏幕，拖拽框选区域；支持双击防误触和辅助线。",
+  },
+  {
+    title: "原生标注",
+    description: "左键画笔、右键橡皮；滚轮换色，Ctrl+滚轮调透明度，支持撤销/重做。",
+  },
+  {
+    title: "复制与保存",
+    description: "一键复制到剪贴板或保存为 PNG，标注和擦除结果会一起合成。",
+  },
+  {
+    title: "贴图",
+    description: "把选区贴到屏幕最上层，可拖动、双击关闭；支持数量上限和确认气泡。",
+  },
+  {
+    title: "托盘常驻",
+    description: "关闭设置窗口后继续在托盘运行，截图快捷键随时可用。",
+  },
+  {
+    title: "轻量原生",
+    description: "截图与贴图使用 Win32 原生绘制，设置页按需加载，安装包约 1–2 MB。",
+  },
+];
 const autoLaunch = ref(false);
 const doublePress = ref(false);
 const screenshotHotkey = ref("Alt+X");
@@ -721,6 +788,52 @@ function onKeyDown(e: KeyboardEvent, mode: string) {
   line-height: 1.5;
 }
 
+.feature-card {
+  padding-bottom: 8px;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 4px 16px 16px;
+}
+
+.feature-item {
+  padding: 14px 15px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  transition: border-color 0.16s ease, transform 0.16s ease;
+}
+
+.feature-item:hover {
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+  transform: translateY(-1px);
+}
+
+.feature-index {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+}
+
+.feature-item h3 {
+  margin: 0 0 5px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.feature-item p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .setting-row {
   display: flex;
   align-items: center;
@@ -928,12 +1041,17 @@ kbd {
   .slider,
   .slider::before,
   .setting-row,
-  .settings-card {
+  .settings-card,
+  .feature-item {
     transition: none;
   }
 }
 
 @media (max-width: 720px) {
+  .feature-grid {
+    grid-template-columns: 1fr;
+  }
+
   .sidebar {
     flex-basis: 184px;
   }
