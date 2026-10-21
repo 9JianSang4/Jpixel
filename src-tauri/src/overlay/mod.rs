@@ -821,7 +821,7 @@ fn pen_rgb(state: &OverlayState) -> (u8, u8, u8) {
     PEN_PALETTE[state.pen_color_index.min(PEN_PALETTE.len() - 1)]
 }
 
-fn draw_pen_color_preview(hdc: HDC, state: &OverlayState) {
+fn draw_pen_color_preview(hdc: HDC, back: &Dib, state: &OverlayState) {
     if state.hover_button != Some(ToolbarButton::Pen) {
         return;
     }
@@ -851,13 +851,29 @@ fn draw_pen_color_preview(hdc: HDC, state: &OverlayState) {
         SelectObject(hdc, old_brush);
         let _ = DeleteObject(HGDIOBJ(backdrop.0));
 
-        let color = CreateSolidBrush(rgb(r, g, b));
-        let old_brush = SelectObject(hdc, HGDIOBJ(color.0));
-        let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-        let _ = RoundRect(hdc, left, top, left + size, top + size, 6, 6);
-        SelectObject(hdc, old_pen);
-        SelectObject(hdc, old_brush);
-        let _ = DeleteObject(HGDIOBJ(color.0));
+        // Checkerboard so low-opacity colors (especially white) are visible.
+        let light = CreateSolidBrush(rgb(220, 220, 222));
+        let dark = CreateSolidBrush(rgb(150, 150, 154));
+        let cell = 5;
+        for row in 0..((size + cell - 1) / cell) {
+            for col in 0..((size + cell - 1) / cell) {
+                let rect = RECT {
+                    left: left + col * cell,
+                    top: top + row * cell,
+                    right: (left + (col + 1) * cell).min(left + size),
+                    bottom: (top + (row + 1) * cell).min(top + size),
+                };
+                let brush = if (row + col) % 2 == 0 { light } else { dark };
+                let _ = FillRect(hdc, &rect, brush);
+            }
+        }
+        let _ = DeleteObject(HGDIOBJ(light.0));
+        let _ = DeleteObject(HGDIOBJ(dark.0));
+
+        // Blend the selected color over the checkerboard using its alpha.
+        for y in top..top + size {
+            back.blend_hline(y, left, left + size, (r, g, b), state.pen_alpha);
+        }
 
         let border = CreatePen(PS_SOLID, 1, rgb(255, 255, 255));
         let old_pen = SelectObject(hdc, HGDIOBJ(border.0));
@@ -880,7 +896,7 @@ fn draw_pen_color_preview(hdc: HDC, state: &OverlayState) {
     }
 }
 
-fn draw_toolbar(hdc: HDC, state: &OverlayState) -> Result<()> {
+fn draw_toolbar(hdc: HDC, back: &Dib, state: &OverlayState) -> Result<()> {
     let Some(toolbar) = toolbar_rect(state) else {
         return Ok(());
     };
@@ -956,7 +972,7 @@ fn draw_toolbar(hdc: HDC, state: &OverlayState) -> Result<()> {
             );
         }
 
-        draw_pen_color_preview(hdc, state);
+        draw_pen_color_preview(hdc, back, state);
         SelectObject(hdc, old_font);
         let _ = DeleteObject(HGDIOBJ(font.0));
     }
@@ -1829,7 +1845,7 @@ fn paint(hwnd: HWND) {
                     gdi::paint_overlay(hwnd, back, dimmed, original, selection_rect(state), |hdc| {
                         draw_crosshair(back, state)?;
                         draw_handles(hdc, state)?;
-                        draw_toolbar(hdc, state)
+                        draw_toolbar(hdc, back, state)
                     })
                 {
                     log::error!("native overlay paint failed: {e}");
