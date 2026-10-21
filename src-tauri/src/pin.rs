@@ -13,8 +13,9 @@ use std::time::Instant;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, FrameRect, HGDIOBJ, HALFTONE,
-    InvalidateRect, PAINTSTRUCT, SRCCOPY, SetBrushOrgEx, SetStretchBltMode, StretchBlt,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
+    DeleteObject, EndPaint, FillRect, FrameRect, HGDIOBJ, HALFTONE, InvalidateRect, PAINTSTRUCT,
+    SRCCOPY, SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchBlt, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -25,9 +26,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes,
     SetWindowLongPtrW, SetWindowPos, SetTimer, ShowWindow, CS_DBLCLKS, GWLP_USERDATA,
     HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOSIZE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 const PIN_CLASS: PCWSTR = w!("JpixelPin");
@@ -240,9 +242,10 @@ unsafe fn finish_animation(hwnd: HWND, state: &mut PinState) {
         anim.to.top,
         anim.to.right - anim.to.left,
         anim.to.bottom - anim.to.top,
-        SWP_NOACTIVATE,
+        SWP_NOACTIVATE | SWP_NOCOPYBITS,
     );
     let _ = InvalidateRect(hwnd, None, false);
+    let _ = UpdateWindow(hwnd);
 }
 
 unsafe fn resize_pin(hwnd: HWND, state: &mut PinState, scale: f32, anchor: Option<POINT>) {
@@ -324,9 +327,10 @@ unsafe extern "system" fn pin_wndproc(
                     rect.top,
                     rect.right - rect.left,
                     rect.bottom - rect.top,
-                    SWP_NOACTIVATE,
+                    SWP_NOACTIVATE | SWP_NOCOPYBITS,
                 );
                 let _ = InvalidateRect(hwnd, None, false);
+                let _ = UpdateWindow(hwnd);
                 if done {
                     state.anim = None;
                     state.scale = target_scale;
@@ -341,17 +345,23 @@ unsafe extern "system" fn pin_wndproc(
             if let Some(state) = pin_state(hwnd) {
                 let mut client = RECT::default();
                 let _ = GetClientRect(hwnd, &mut client);
+                let width = (client.right - client.left).max(1);
+                let height = (client.bottom - client.top).max(1);
+                let memory = CreateCompatibleDC(hdc);
+                let bitmap = CreateCompatibleBitmap(hdc, width, height);
+                let old = SelectObject(memory, HGDIOBJ(bitmap.0));
+
                 let background = CreateSolidBrush(rgb(24, 24, 27));
-                let _ = FillRect(hdc, &client, background);
+                let _ = FillRect(memory, &client, background);
                 let _ = DeleteObject(HGDIOBJ(background.0));
                 // The window itself is animated; always fill its current client
                 // area so position/size interpolation never leaves a gap.
-                let draw_width = (client.right - client.left - PIN_BORDER * 2).max(1);
-                let draw_height = (client.bottom - client.top - PIN_BORDER * 2).max(1);
-                let _ = SetStretchBltMode(hdc, HALFTONE);
-                let _ = SetBrushOrgEx(hdc, 0, 0, None);
+                let draw_width = (width - PIN_BORDER * 2).max(1);
+                let draw_height = (height - PIN_BORDER * 2).max(1);
+                let _ = SetStretchBltMode(memory, HALFTONE);
+                let _ = SetBrushOrgEx(memory, 0, 0, None);
                 let _ = StretchBlt(
-                    hdc,
+                    memory,
                     PIN_BORDER,
                     PIN_BORDER,
                     draw_width,
@@ -364,8 +374,14 @@ unsafe extern "system" fn pin_wndproc(
                     SRCCOPY,
                 );
                 let border = CreateSolidBrush(rgb(120, 120, 126));
-                let _ = FrameRect(hdc, &client, border);
+                let _ = FrameRect(memory, &client, border);
                 let _ = DeleteObject(HGDIOBJ(border.0));
+
+                // Blit once; drawing directly during resize caused visible flicker.
+                let _ = BitBlt(hdc, 0, 0, width, height, memory, 0, 0, SRCCOPY);
+                let _ = SelectObject(memory, old);
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+                let _ = DeleteDC(memory);
             }
             let _ = EndPaint(hwnd, &paint);
             LRESULT(0)
