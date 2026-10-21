@@ -259,7 +259,13 @@ pub fn register_hotkey(vk: u32, mods: u32, name: &str) -> Result<()> {
 /// request is posted to the overlay message loop and the result is returned
 /// through a channel. The old hotkey is restored if the new one is taken.
 pub fn change_hotkey(vk: u32, mods: u32, name: &str) -> Result<()> {
-    let hwnd = with_state(|state| state.hwnd)?;
+    // STATE is thread-local to the overlay thread. This function runs on the
+    // Tauri/settings thread, so use the global HWND published by init().
+    let raw = OVERLAY_HWND.load(Ordering::SeqCst);
+    if raw == 0 {
+        return Err(anyhow!("overlay is not initialized"));
+    }
+    let hwnd = HWND(raw);
     let (reply, result) = mpsc::channel();
     {
         let mut pending = PENDING_HOTKEY
