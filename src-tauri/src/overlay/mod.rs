@@ -314,6 +314,7 @@ struct OverlayState {
     mouse_up_releasing: bool,
     color_copied: Option<Instant>,
     magnifier_morph: Option<MagnifierMorph>,
+    magnifier_consumed: bool,
 }
 
 impl OverlayState {
@@ -362,6 +363,7 @@ impl OverlayState {
             mouse_up_releasing: false,
             color_copied: None,
             magnifier_morph: None,
+            magnifier_consumed: false,
         }
     }
 }
@@ -812,6 +814,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.mouse_up_releasing = false;
         state.color_copied = None;
         state.magnifier_morph = None;
+        state.magnifier_consumed = false;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -1535,23 +1538,54 @@ fn magnifier_panel_rect(state: &OverlayState) -> Option<RECT> {
     }
     let max_x = (bounds.right - MAG_PANEL_W).max(bounds.left);
     let max_y = (bounds.bottom - MAG_PANEL_H).max(bounds.top);
-    let x = (cursor.x - MAG_PANEL_W / 2).clamp(bounds.left, max_x);
-    let above = cursor.y - MAG_PANEL_H - 20;
-    let y = if above >= bounds.top {
-        above
-    } else {
-        (cursor.y + 20).clamp(bounds.top, max_y)
+    let desired = RECT {
+        left: (cursor.x - MAG_PANEL_W / 2).clamp(bounds.left, max_x),
+        top: (cursor.y - MAG_PANEL_H - 20).clamp(bounds.top, max_y),
+        right: 0,
+        bottom: 0,
     };
-    Some(RECT {
-        left: x,
-        top: y,
-        right: x + MAG_PANEL_W,
-        bottom: y + MAG_PANEL_H,
-    })
+    let desired = RECT {
+        left: desired.left,
+        top: desired.top,
+        right: desired.left + MAG_PANEL_W,
+        bottom: desired.top + MAG_PANEL_H,
+    };
+    if let Some(selection) = selection_rect(state) {
+        let margin = 12;
+        let candidates = [
+            (cursor.x - MAG_PANEL_W / 2, selection.top - MAG_PANEL_H - margin),
+            (cursor.x - MAG_PANEL_W / 2, selection.bottom + margin),
+            (selection.right + margin, cursor.y - MAG_PANEL_H / 2),
+            (selection.left - MAG_PANEL_W - margin, cursor.y - MAG_PANEL_H / 2),
+        ];
+        for (left, top) in candidates {
+            let candidate = RECT {
+                left: left.clamp(bounds.left, max_x),
+                top: top.clamp(bounds.top, max_y),
+                right: 0,
+                bottom: 0,
+            };
+            let candidate = RECT {
+                left: candidate.left,
+                top: candidate.top,
+                right: candidate.left + MAG_PANEL_W,
+                bottom: candidate.top + MAG_PANEL_H,
+            };
+            if candidate.left >= bounds.left
+                && candidate.top >= bounds.top
+                && candidate.right <= bounds.right
+                && candidate.bottom <= bounds.bottom
+                && !rects_intersect(candidate, selection)
+            {
+                return Some(candidate);
+            }
+        }
+    }
+    Some(desired)
 }
 
 fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
-    if !current_options().magnifier_enabled {
+    if !current_options().magnifier_enabled || state.magnifier_consumed {
         return Ok(());
     }
     if selection_rect(state).is_some() && !state.dragging {
@@ -2433,6 +2467,7 @@ pub fn hide_overlay() {
         state.selection_pending_start = None;
         state.color_copied = None;
         state.magnifier_morph = None;
+        state.magnifier_consumed = false;
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
@@ -3212,13 +3247,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             },
                             start: Instant::now(),
                         });
-                        if !adjusting && current_options().magnifier_enabled {
+                        if !adjusting
+                            && !state.magnifier_consumed
+                            && current_options().magnifier_enabled
+                        {
                             if let Some(from) = morph_from {
                                 state.magnifier_morph = Some(MagnifierMorph {
                                     from,
                                     to: target,
                                     start: Instant::now(),
                                 });
+                                state.magnifier_consumed = true;
                             }
                         }
                         unsafe {
@@ -3228,7 +3267,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         state.toolbar_motion = None;
                     }
                 } else {
-                    if !adjusting && current_options().magnifier_enabled {
+                    if !adjusting
+                        && !state.magnifier_consumed
+                        && current_options().magnifier_enabled
+                    {
                         if let (Some(from), Some(target)) =
                             (morph_from, toolbar_target_rect(state))
                         {
@@ -3237,6 +3279,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                                 to: target,
                                 start: Instant::now(),
                             });
+                            state.magnifier_consumed = true;
                         }
                     }
                     sync_toolbar_motion(state);
