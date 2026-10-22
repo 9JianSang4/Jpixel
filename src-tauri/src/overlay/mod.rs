@@ -20,6 +20,7 @@ use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Globalization::HIMC;
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteObject,
@@ -31,23 +32,26 @@ use windows::Win32::Graphics::Gdi::{
     PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::Ime::ImmAssociateContext;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, RegisterHotKey, ReleaseCapture, SetActiveWindow, SetCapture, SetFocus,
     UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU,
     VK_RETURN, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, ClipCursor, CreateWindowExW, DefWindowProcW, DispatchMessageW,
-    GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, KillTimer, LoadCursorW,
-    MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow,
-    SetTimer, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST,
-    IDC_ARROW, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_SIZEALL, MB_ICONERROR,
-    MB_OK, MSG, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CAPTURECHANGED,
-    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
+    BringWindowToTop, ClipCursor, CreateWindowExW, DefWindowProcW,
+    DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect,
+    GetWindowThreadProcessId, KillTimer, LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage,
+    RegisterClassW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW, IDC_SIZENESW, IDC_SIZENS,
+    IDC_SIZENWSE, IDC_SIZEWE, IDC_SIZEALL, MB_ICONERROR, MB_OK, MSG, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -252,6 +256,7 @@ const TOOLBAR_TIMER_ID: usize = 0x52;
 const COLOR_COPY_TIMER_ID: usize = 0x53;
 const HOTKEY_RETRY_TIMER_ID: usize = 0x54;
 const MAGNIFIER_TIMER_ID: usize = 0x55;
+const FOCUS_RETRY_TIMER_ID: usize = 0x56;
 const MAGNIFIER_SLIDE_MS: u128 = 100;
 const MAG_PANEL_W: i32 = 200;
 const MAG_PANEL_H: i32 = 232;
@@ -333,6 +338,7 @@ struct OverlayState {
     magnifier_morph: Option<MagnifierMorph>,
     magnifier_consumed: bool,
     magnifier_side: MagnifierSide,
+    magnifier_side_since: Instant,
     magnifier_motion: Option<MagnifierMotion>,
 }
 
@@ -384,6 +390,7 @@ impl OverlayState {
             magnifier_morph: None,
             magnifier_consumed: false,
             magnifier_side: MagnifierSide::BottomRight,
+            magnifier_side_since: Instant::now(),
             magnifier_motion: None,
         }
     }
@@ -455,6 +462,10 @@ pub fn init() -> Result<()> {
         return Err(anyhow!("CreateWindowExW failed"));
     }
     unsafe {
+        // The overlay is a canvas, not a text field. Detaching the IME context
+        // prevents Chinese input methods from opening a candidate window when
+        // the user presses C to copy a color value.
+        let _ = ImmAssociateContext(hwnd, HIMC(0));
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
     STATE.with(|cell| {
@@ -737,16 +748,35 @@ pub fn run_message_loop() {
 
 fn force_foreground(hwnd: HWND) {
     unsafe {
+        let foreground = GetForegroundWindow();
+        let foreground_thread = if foreground.0 != 0 {
+            GetWindowThreadProcessId(foreground, None)
+        } else {
+            0
+        };
+        let current_thread = GetCurrentThreadId();
+        let attached = foreground_thread != 0
+            && foreground_thread != current_thread
+            && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+
         let _ = BringWindowToTop(hwnd);
         let set_foreground = SetForegroundWindow(hwnd).as_bool();
         let _ = SetActiveWindow(hwnd);
         let set_focus = SetFocus(hwnd).0 != 0;
-        let foreground = GetForegroundWindow();
+
+        if attached {
+            let _ = AttachThreadInput(current_thread, foreground_thread, false);
+        }
+        // Foreground activation can be denied for a short moment after a fast
+        // hotkey sequence. Retry once shortly after showing so Esc is never
+        // silently delivered to the previous app.
+        let _ = SetTimer(hwnd, FOCUS_RETRY_TIMER_ID, 50, None);
         log::debug!(
-            "native overlay focus: set_foreground={} set_focus={} foreground={} target={}",
+            "native overlay focus: attached={} set_foreground={} set_focus={} foreground={} target={}",
+            attached,
             set_foreground,
             set_focus,
-            foreground.0,
+            GetForegroundWindow().0,
             hwnd.0
         );
     }
@@ -837,6 +867,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.magnifier_morph = None;
         state.magnifier_consumed = false;
         state.magnifier_side = MagnifierSide::BottomRight;
+        state.magnifier_side_since = Instant::now();
         state.magnifier_motion = None;
         state.visible = true;
         state.prev_foreground = prev;
@@ -1804,36 +1835,52 @@ fn magnifier_panel_rect(state: &OverlayState) -> Option<RECT> {
     Some(target)
 }
 
+fn switch_magnifier_side(state: &mut OverlayState, side: MagnifierSide) {
+    if side == state.magnifier_side {
+        return;
+    }
+    let from = magnifier_panel_rect(state)
+        .or_else(|| magnifier_candidate(state, state.magnifier_side))
+        .map(|rect| POINT {
+            x: rect.left,
+            y: rect.top,
+        });
+    state.magnifier_side = side;
+    state.magnifier_side_since = Instant::now();
+    if let (Some(from), Some(target)) = (from, magnifier_candidate(state, side)) {
+        state.magnifier_motion = Some(MagnifierMotion {
+            from,
+            to: POINT {
+                x: target.left,
+                y: target.top,
+            },
+            start: Instant::now(),
+        });
+        unsafe {
+            let _ = SetTimer(state.hwnd, MAGNIFIER_TIMER_ID, 16, None);
+        }
+    }
+}
+
 fn update_magnifier_side(state: &mut OverlayState) {
     if state.magnifier_consumed || !current_options().magnifier_enabled {
         return;
     }
+
+    // Prefer bottom-right. If the panel was forced elsewhere by an edge or the
+    // selection, return once the preferred side has been valid for a short
+    // moment; the delay prevents side-to-side flicker at boundaries.
+    let preferred = MagnifierSide::BottomRight;
+    if state.magnifier_side != preferred
+        && state.magnifier_side_since.elapsed().as_millis() >= 160
+        && magnifier_candidate(state, preferred).is_some()
+    {
+        switch_magnifier_side(state, preferred);
+    }
+
     if magnifier_candidate(state, state.magnifier_side).is_none() {
         let best = magnifier_best_side(state);
-        if best != state.magnifier_side {
-            let from = magnifier_panel_rect(state)
-                .or_else(|| magnifier_candidate(state, state.magnifier_side))
-                .map(|rect| POINT {
-                    x: rect.left,
-                    y: rect.top,
-                });
-            state.magnifier_side = best;
-            if let (Some(from), Some(target)) =
-                (from, magnifier_candidate(state, best))
-            {
-                state.magnifier_motion = Some(MagnifierMotion {
-                    from,
-                    to: POINT {
-                        x: target.left,
-                        y: target.top,
-                    },
-                    start: Instant::now(),
-                });
-                unsafe {
-                    let _ = SetTimer(state.hwnd, MAGNIFIER_TIMER_ID, 16, None);
-                }
-            }
-        }
+        switch_magnifier_side(state, best);
     }
     if let Some(target) = magnifier_candidate(state, state.magnifier_side) {
         if let Some(motion) = state.magnifier_motion.as_mut() {
@@ -2719,6 +2766,7 @@ pub fn hide_overlay() {
         state.magnifier_morph = None;
         state.magnifier_consumed = false;
         state.magnifier_side = MagnifierSide::BottomRight;
+        state.magnifier_side_since = Instant::now();
         state.magnifier_motion = None;
         state.visible = false;
         state.dragging = false;
@@ -3167,6 +3215,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     });
                 }
                 invalidate_dirty(hwnd, dirty);
+            } else if wparam.0 == FOCUS_RETRY_TIMER_ID {
+                unsafe {
+                    let _ = KillTimer(hwnd, FOCUS_RETRY_TIMER_ID);
+                }
+                let visible = with_state(|state| state.visible).unwrap_or(false);
+                if visible && unsafe { GetForegroundWindow() } != hwnd {
+                    force_foreground(hwnd);
+                    unsafe {
+                        let _ = KillTimer(hwnd, FOCUS_RETRY_TIMER_ID);
+                    }
+                }
             }
             LRESULT(0)
         }
