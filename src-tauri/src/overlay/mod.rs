@@ -278,6 +278,7 @@ enum MagnifierSide {
     Below,
     Left,
     Right,
+    BottomRight,
 }
 
 struct MagnifierMotion {
@@ -382,7 +383,7 @@ impl OverlayState {
             color_copied: None,
             magnifier_morph: None,
             magnifier_consumed: false,
-            magnifier_side: MagnifierSide::Above,
+            magnifier_side: MagnifierSide::BottomRight,
             magnifier_motion: None,
         }
     }
@@ -835,7 +836,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.color_copied = None;
         state.magnifier_morph = None;
         state.magnifier_consumed = false;
-        state.magnifier_side = MagnifierSide::Above;
+        state.magnifier_side = MagnifierSide::BottomRight;
         state.magnifier_motion = None;
         state.visible = true;
         state.prev_foreground = prev;
@@ -1571,6 +1572,10 @@ fn magnifier_candidate(state: &OverlayState, side: MagnifierSide) -> Option<RECT
             selection.right + margin,
             cursor.y - MAG_PANEL_H / 2,
         ),
+        (Some(selection), MagnifierSide::BottomRight) => (
+            selection.right + margin,
+            selection.bottom + margin,
+        ),
         (None, MagnifierSide::Above) => (
             cursor.x - MAG_PANEL_W / 2,
             cursor.y - MAG_PANEL_H - cursor_gap,
@@ -1586,6 +1591,10 @@ fn magnifier_candidate(state: &OverlayState, side: MagnifierSide) -> Option<RECT
         (None, MagnifierSide::Right) => (
             cursor.x + cursor_gap,
             cursor.y - MAG_PANEL_H / 2,
+        ),
+        (None, MagnifierSide::BottomRight) => (
+            cursor.x + cursor_gap,
+            cursor.y + cursor_gap,
         ),
     };
     let max_x = (bounds.right - MAG_PANEL_W).max(bounds.left);
@@ -1609,6 +1618,17 @@ fn magnifier_candidate(state: &OverlayState, side: MagnifierSide) -> Option<RECT
     {
         return None;
     }
+    // Never sit on top of the cursor itself. Without this, a panel clamped to
+    // the top edge can cover the pixel it is supposed to magnify.
+    let keepout = RECT {
+        left: cursor.x - 16,
+        top: cursor.y - 16,
+        right: cursor.x + 16,
+        bottom: cursor.y + 16,
+    };
+    if rects_intersect(rect, keepout) {
+        return None;
+    }
     if let Some(selection) = selection {
         if rects_intersect(rect, selection) {
             return None;
@@ -1630,11 +1650,17 @@ fn magnifier_side_space(state: &OverlayState, side: MagnifierSide) -> i32 {
         MagnifierSide::Below => bounds.bottom - anchor.map(|r| r.bottom).unwrap_or(cursor.y),
         MagnifierSide::Left => anchor.map(|r| r.left).unwrap_or(cursor.x) - bounds.left,
         MagnifierSide::Right => bounds.right - anchor.map(|r| r.right).unwrap_or(cursor.x),
+        MagnifierSide::BottomRight => {
+            let right = bounds.right - anchor.map(|r| r.right).unwrap_or(cursor.x);
+            let bottom = bounds.bottom - anchor.map(|r| r.bottom).unwrap_or(cursor.y);
+            right.min(bottom)
+        }
     }
 }
 
 fn magnifier_best_side(state: &OverlayState) -> MagnifierSide {
     let order = [
+        MagnifierSide::BottomRight,
         MagnifierSide::Above,
         MagnifierSide::Below,
         MagnifierSide::Right,
@@ -2615,7 +2641,7 @@ pub fn hide_overlay() {
         state.color_copied = None;
         state.magnifier_morph = None;
         state.magnifier_consumed = false;
-        state.magnifier_side = MagnifierSide::Above;
+        state.magnifier_side = MagnifierSide::BottomRight;
         state.magnifier_motion = None;
         state.visible = false;
         state.dragging = false;
