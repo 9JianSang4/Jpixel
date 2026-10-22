@@ -37,12 +37,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const PIN_CLASS: PCWSTR = w!("JpixelPin");
 const PIN_BORDER: i32 = 1;
 const MIN_SCALE: f32 = 0.1;
-const MAX_SCALE: f32 = 4.0;
+const MAX_SCALE: f32 = 2.0;
 const SCALE_STEP: f32 = 0.1;
 const ZOOM_MS: u64 = 140;
 const ZOOM_TIMER_ID: usize = 0x62;
 const OPACITY_STEP: i32 = 26;
-const MIN_OPACITY: i32 = 26;
+const MIN_OPACITY: i32 = 77;
 
 static PIN_LIMIT: AtomicUsize = AtomicUsize::new(8);
 
@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn scaled_size_is_clamped_and_never_zero() {
         assert_eq!(scaled_size(400, 200, 0.0), (40, 20));
-        assert_eq!(scaled_size(400, 200, 99.0), (1600, 800));
+        assert_eq!(scaled_size(400, 200, 99.0), (800, 400));
         assert_eq!(scaled_size(1, 1, MIN_SCALE), (1, 1));
     }
 
