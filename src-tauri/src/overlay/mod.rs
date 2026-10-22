@@ -990,17 +990,44 @@ fn point_rect(point: POINT, width: i32, height: i32) -> RECT {
     }
 }
 
+fn magnifier_morph_rect_at(morph: &MagnifierMorph, at: Instant) -> RECT {
+    let t = (at.saturating_duration_since(morph.start).as_millis() as f32
+        / TOOLBAR_ANIM_MS as f32)
+        .clamp(0.0, 1.0);
+    let eased = ease_out_cubic(t);
+    RECT {
+        left: morph.from.left
+            + ((morph.to.left - morph.from.left) as f32 * eased).round() as i32,
+        top: morph.from.top
+            + ((morph.to.top - morph.from.top) as f32 * eased).round() as i32,
+        right: morph.from.right
+            + ((morph.to.right - morph.from.right) as f32 * eased).round() as i32,
+        bottom: morph.from.bottom
+            + ((morph.to.bottom - morph.from.bottom) as f32 * eased).round() as i32,
+    }
+}
+
 fn toolbar_dirty_rect(state: &OverlayState) -> Option<RECT> {
+    if let Some(morph) = state.magnifier_morph.as_ref() {
+        // While morphing, the toolbar is clipped to the morph card, so only
+        // the card's current and immediately previous rectangles are visible.
+        // Including the toolbar target here would recreate the huge diagonal
+        // dirty rectangle this optimization is meant to avoid.
+        let now = Instant::now();
+        let current = magnifier_morph_rect_at(morph, now);
+        let previous_at = now
+            .checked_sub(Duration::from_millis(50))
+            .unwrap_or(morph.start);
+        let previous = magnifier_morph_rect_at(morph, previous_at);
+        return Some(rect_expand(rect_union(current, previous), 8));
+    }
+
     let mut dirty = toolbar_rect(state);
     if let Some(motion) = state.toolbar_motion.as_ref() {
         let from = point_rect(motion.from, TOOLBAR_W, TOOLBAR_H);
         let to = point_rect(motion.to, TOOLBAR_W, TOOLBAR_H);
         let motion_rect = rect_union(from, to);
         dirty = Some(dirty.map(|rect| rect_union(rect, motion_rect)).unwrap_or(motion_rect));
-    }
-    if let Some(morph) = state.magnifier_morph.as_ref() {
-        let morph_rect = rect_union(morph.from, morph.to);
-        dirty = Some(dirty.map(|rect| rect_union(rect, morph_rect)).unwrap_or(morph_rect));
     }
     dirty.map(|rect| rect_expand(rect, 8))
 }
@@ -1999,18 +2026,7 @@ fn draw_magnifier_morph(
     state: &OverlayState,
     morph: &MagnifierMorph,
 ) -> Result<()> {
-    let t = (morph.start.elapsed().as_millis() as f32 / TOOLBAR_ANIM_MS as f32).clamp(0.0, 1.0);
-    let eased = ease_out_cubic(t);
-    let rect = RECT {
-        left: morph.from.left
-            + ((morph.to.left - morph.from.left) as f32 * eased).round() as i32,
-        top: morph.from.top
-            + ((morph.to.top - morph.from.top) as f32 * eased).round() as i32,
-        right: morph.from.right
-            + ((morph.to.right - morph.from.right) as f32 * eased).round() as i32,
-        bottom: morph.from.bottom
-            + ((morph.to.bottom - morph.from.bottom) as f32 * eased).round() as i32,
-    };
+    let rect = magnifier_morph_rect_at(morph, Instant::now());
     unsafe {
         crate::round_rect::draw_round_rect(
             hdc,
