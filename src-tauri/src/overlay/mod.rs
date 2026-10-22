@@ -23,10 +23,10 @@ use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POI
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteObject,
-    DrawTextW, Ellipse, EndPaint, FillRect, GetStockObject, RestoreDC, RoundRect, SaveDC,
-    ScreenToClient, SelectClipRgn, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor,
-    StretchBlt, UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLORONCOLOR,
-    DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FW_BOLD,
+    DrawTextW, Ellipse, EndPaint, FillRect, GetStockObject, IntersectClipRect, RestoreDC,
+    RoundRect, SaveDC, ScreenToClient, SelectClipRgn, SelectObject, SetBkMode, SetStretchBltMode,
+    SetTextColor, StretchBlt, UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLORONCOLOR,
+    DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_BOLD,
     FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_BRUSH, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
     PS_SOLID, SRCCOPY, TRANSPARENT,
 };
@@ -251,11 +251,22 @@ const TOOLBAR_ANIM_OFFSET: i32 = 8;
 const TOOLBAR_TIMER_ID: usize = 0x52;
 const COLOR_COPY_TIMER_ID: usize = 0x53;
 const HOTKEY_RETRY_TIMER_ID: usize = 0x54;
+const MAG_PANEL_W: i32 = 200;
+const MAG_PANEL_H: i32 = 232;
+const MAG_IMAGE_SIZE: i32 = 152;
+const MAG_PAD: i32 = 14;
+const MAG_SOURCE: i32 = 15;
 
 #[derive(Debug, Clone, Copy)]
 struct ToolbarMotion {
     from: POINT,
     to: POINT,
+    start: Instant,
+}
+
+struct MagnifierMorph {
+    from: RECT,
+    to: RECT,
     start: Instant,
 }
 
@@ -302,6 +313,7 @@ struct OverlayState {
     selection_pending_start: Option<POINT>,
     mouse_up_releasing: bool,
     color_copied: Option<Instant>,
+    magnifier_morph: Option<MagnifierMorph>,
 }
 
 impl OverlayState {
@@ -349,6 +361,7 @@ impl OverlayState {
             selection_pending_start: None,
             mouse_up_releasing: false,
             color_copied: None,
+            magnifier_morph: None,
         }
     }
 }
@@ -798,6 +811,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.selection_pending_start = None;
         state.mouse_up_releasing = false;
         state.color_copied = None;
+        state.magnifier_morph = None;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -1509,6 +1523,33 @@ fn draw_crosshair(back: &Dib, state: &OverlayState) -> Result<()> {
     Ok(())
 }
 
+fn magnifier_panel_rect(state: &OverlayState) -> Option<RECT> {
+    let cursor = state.cursor?;
+    let bounds = image_bounds(state)?;
+    if cursor.x < bounds.left
+        || cursor.y < bounds.top
+        || cursor.x >= bounds.right
+        || cursor.y >= bounds.bottom
+    {
+        return None;
+    }
+    let max_x = (bounds.right - MAG_PANEL_W).max(bounds.left);
+    let max_y = (bounds.bottom - MAG_PANEL_H).max(bounds.top);
+    let x = (cursor.x - MAG_PANEL_W / 2).clamp(bounds.left, max_x);
+    let above = cursor.y - MAG_PANEL_H - 20;
+    let y = if above >= bounds.top {
+        above
+    } else {
+        (cursor.y + 20).clamp(bounds.top, max_y)
+    };
+    Some(RECT {
+        left: x,
+        top: y,
+        right: x + MAG_PANEL_W,
+        bottom: y + MAG_PANEL_H,
+    })
+}
+
 fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
     if !current_options().magnifier_enabled {
         return Ok(());
@@ -1516,108 +1557,77 @@ fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
     if selection_rect(state).is_some() && !state.dragging {
         return Ok(());
     }
-    let (Some(cursor), Some(image), Some(bounds)) =
-        (state.cursor, state.original.as_ref(), image_bounds(state))
-    else {
+    let (Some(cursor), Some(image), Some(bounds), Some(panel)) = (
+        state.cursor,
+        state.original.as_ref(),
+        image_bounds(state),
+        magnifier_panel_rect(state),
+    ) else {
         return Ok(());
     };
-    if cursor.x < bounds.left
-        || cursor.y < bounds.top
-        || cursor.x >= bounds.right
-        || cursor.y >= bounds.bottom
-    {
-        return Ok(());
-    }
-
-    const SOURCE: i32 = 15;
-    const IMAGE_SIZE: i32 = 144;
-    const PANEL_W: i32 = 184;
-    const PANEL_H: i32 = 214;
-    const PAD: i32 = 10;
-
-    let source_x = (cursor.x - SOURCE / 2)
-        .clamp(bounds.left, (bounds.right - SOURCE).max(bounds.left));
-    let source_y = (cursor.y - SOURCE / 2)
-        .clamp(bounds.top, (bounds.bottom - SOURCE).max(bounds.top));
-    let max_x = (bounds.right - PANEL_W).max(bounds.left);
-    let max_y = (bounds.bottom - PANEL_H).max(bounds.top);
-    let x = if cursor.x + 18 + PANEL_W <= bounds.right {
-        cursor.x + 18
-    } else {
-        (cursor.x - PANEL_W - 18).clamp(bounds.left, max_x)
-    };
-    let y = if cursor.y + 18 + PANEL_H <= bounds.bottom {
-        cursor.y + 18
-    } else {
-        (cursor.y - PANEL_H - 18).clamp(bounds.top, max_y)
-    };
-    let x = x.clamp(bounds.left, max_x);
-    let y = y.clamp(bounds.top, max_y);
+    let source_x = (cursor.x - MAG_SOURCE / 2)
+        .clamp(bounds.left, (bounds.right - MAG_SOURCE).max(bounds.left));
+    let source_y = (cursor.y - MAG_SOURCE / 2)
+        .clamp(bounds.top, (bounds.bottom - MAG_SOURCE).max(bounds.top));
     let Some((r, g, b)) = image.pixel_rgb(cursor.x, cursor.y) else {
         return Ok(());
     };
+    let x = panel.left;
+    let y = panel.top;
+    let image_x = x + (MAG_PANEL_W - MAG_IMAGE_SIZE) / 2;
+    let image_y = y + MAG_PAD;
 
     unsafe {
-        let background = CreateSolidBrush(rgb(28, 28, 30));
-        let old_brush = SelectObject(hdc, HGDIOBJ(background.0));
-        let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-        let _ = RoundRect(hdc, x, y, x + PANEL_W, y + PANEL_H, 12, 12);
-        let _ = SelectObject(hdc, old_pen);
-        let _ = SelectObject(hdc, old_brush);
-        let _ = DeleteObject(HGDIOBJ(background.0));
+        crate::round_rect::draw_round_rect(
+            hdc,
+            x,
+            y,
+            x + MAG_PANEL_W,
+            y + MAG_PANEL_H,
+            12.0,
+            Some(0xFF1C1C1E),
+            Some((0xFF3A3A40, 1.0)),
+        );
 
         let _ = SetStretchBltMode(hdc, COLORONCOLOR);
         let _ = StretchBlt(
             hdc,
-            x + PAD,
-            y + PAD,
-            IMAGE_SIZE,
-            IMAGE_SIZE,
+            image_x,
+            image_y,
+            MAG_IMAGE_SIZE,
+            MAG_IMAGE_SIZE,
             image.hdc(),
             source_x,
             source_y,
-            SOURCE,
-            SOURCE,
+            MAG_SOURCE,
+            MAG_SOURCE,
             SRCCOPY,
         );
 
         let cross = CreateSolidBrush(rgb(255, 255, 255));
-        let center_x = x + PAD + IMAGE_SIZE / 2;
-        let center_y = y + PAD + IMAGE_SIZE / 2;
+        let center_x = image_x + MAG_IMAGE_SIZE / 2;
+        let center_y = image_y + MAG_IMAGE_SIZE / 2;
         let _ = FillRect(
             hdc,
             &RECT {
                 left: center_x - 1,
-                top: y + PAD,
+                top: image_y,
                 right: center_x + 1,
-                bottom: y + PAD + IMAGE_SIZE,
+                bottom: image_y + MAG_IMAGE_SIZE,
             },
             cross,
         );
         let _ = FillRect(
             hdc,
             &RECT {
-                left: x + PAD,
+                left: image_x,
                 top: center_y - 1,
-                right: x + PAD + IMAGE_SIZE,
+                right: image_x + MAG_IMAGE_SIZE,
                 bottom: center_y + 1,
             },
             cross,
         );
         let _ = DeleteObject(HGDIOBJ(cross.0));
-
-        let swatch = CreateSolidBrush(rgb(r, g, b));
-        let _ = FillRect(
-            hdc,
-            &RECT {
-                left: x + PAD + 2,
-                top: y + PAD + IMAGE_SIZE + 8,
-                right: x + PAD + 14,
-                bottom: y + PAD + IMAGE_SIZE + 20,
-            },
-            swatch,
-        );
-        let _ = DeleteObject(HGDIOBJ(swatch.0));
 
         let _ = SetBkMode(hdc, TRANSPARENT);
         let font = CreateFontW(
@@ -1642,16 +1652,16 @@ fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
             .encode_utf16()
             .collect();
         let mut hex_rect = RECT {
-            left: x + PAD + 20,
-            top: y + PAD + IMAGE_SIZE + 4,
-            right: x + PANEL_W - PAD,
-            bottom: y + PAD + IMAGE_SIZE + 24,
+            left: x + 8,
+            top: image_y + MAG_IMAGE_SIZE + 4,
+            right: x + MAG_PANEL_W - 8,
+            bottom: image_y + MAG_IMAGE_SIZE + 24,
         };
         let _ = DrawTextW(
             hdc,
             &mut hex,
             &mut hex_rect,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
         );
 
         let small = CreateFontW(
@@ -1676,16 +1686,16 @@ fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
             .encode_utf16()
             .collect();
         let mut rgb_rect = RECT {
-            left: x + PAD,
-            top: y + PAD + IMAGE_SIZE + 24,
-            right: x + PANEL_W - PAD,
-            bottom: y + PAD + IMAGE_SIZE + 40,
+            left: x + 8,
+            top: image_y + MAG_IMAGE_SIZE + 26,
+            right: x + MAG_PANEL_W - 8,
+            bottom: image_y + MAG_IMAGE_SIZE + 44,
         };
         let _ = DrawTextW(
             hdc,
             &mut rgb_text,
             &mut rgb_rect,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
         );
         let mut hint: Vec<u16> = if state
             .color_copied
@@ -1697,16 +1707,16 @@ fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
             "C 复制颜色".encode_utf16().collect()
         };
         let mut hint_rect = RECT {
-            left: x + PAD,
-            top: y + PANEL_H - 18,
-            right: x + PANEL_W - PAD,
-            bottom: y + PANEL_H - 4,
+            left: x + 8,
+            top: y + MAG_PANEL_H - 24,
+            right: x + MAG_PANEL_W - 8,
+            bottom: y + MAG_PANEL_H - 6,
         };
         let _ = DrawTextW(
             hdc,
             &mut hint,
             &mut hint_rect,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
         );
         let _ = SelectObject(hdc, old_font);
         let _ = DeleteObject(HGDIOBJ(font.0));
@@ -1715,7 +1725,45 @@ fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
     Ok(())
 }
 
-fn draw_handles(hdc: HDC, state: &OverlayState) -> Result<()> {    if current_options().selection_mode != SelectionMode::Resize {
+fn draw_magnifier_morph(
+    hdc: HDC,
+    back: &Dib,
+    state: &OverlayState,
+    morph: &MagnifierMorph,
+) -> Result<()> {
+    let t = (morph.start.elapsed().as_millis() as f32 / TOOLBAR_ANIM_MS as f32).clamp(0.0, 1.0);
+    let eased = ease_out_cubic(t);
+    let rect = RECT {
+        left: morph.from.left
+            + ((morph.to.left - morph.from.left) as f32 * eased).round() as i32,
+        top: morph.from.top
+            + ((morph.to.top - morph.from.top) as f32 * eased).round() as i32,
+        right: morph.from.right
+            + ((morph.to.right - morph.from.right) as f32 * eased).round() as i32,
+        bottom: morph.from.bottom
+            + ((morph.to.bottom - morph.from.bottom) as f32 * eased).round() as i32,
+    };
+    unsafe {
+        crate::round_rect::draw_round_rect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            12.0,
+            Some(0xFF1C1C1E),
+            Some((0xFF3A3A40, 1.0)),
+        );
+        let saved = SaveDC(hdc);
+        let _ = IntersectClipRect(hdc, rect.left, rect.top, rect.right, rect.bottom);
+        draw_toolbar(hdc, back, state)?;
+        let _ = RestoreDC(hdc, saved);
+    }
+    Ok(())
+}
+
+fn draw_handles(hdc: HDC, state: &OverlayState) -> Result<()> {
+    if current_options().selection_mode != SelectionMode::Resize {
         return Ok(());
     }
     unsafe {
@@ -2384,6 +2432,7 @@ pub fn hide_overlay() {
         state.toolbar_last = None;
         state.selection_pending_start = None;
         state.color_copied = None;
+        state.magnifier_morph = None;
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
@@ -2696,7 +2745,15 @@ fn paint(hwnd: HWND) {
                         draw_magnifier(hdc, state)?;
                         draw_handles(hdc, state)?;
                         draw_eraser_cursor(hdc, state)?;
-                        draw_toolbar(hdc, back, state)?;
+                        if let Some(morph) = state.magnifier_morph.as_ref() {
+                            if morph.start.elapsed().as_millis() < TOOLBAR_ANIM_MS {
+                                draw_magnifier_morph(hdc, back, state, morph)?;
+                            } else {
+                                draw_toolbar(hdc, back, state)?;
+                            }
+                        } else {
+                            draw_toolbar(hdc, back, state)?;
+                        }
                         Ok(())
                     })
                 {
@@ -2783,6 +2840,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     unsafe {
                         let _ = KillTimer(hwnd, TOOLBAR_TIMER_ID);
                     }
+                    let _ = with_state_mut(|state| {
+                        state.magnifier_morph = None;
+                        Ok(())
+                    });
                 }
                 gdi::invalidate(hwnd);
             } else if wparam.0 == COLOR_COPY_TIMER_ID {
@@ -2869,6 +2930,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 state.selection_pending_start = Some(clamped);
                 state.toolbar_freeze = frozen_toolbar;
                 state.toolbar_motion = None;
+                state.magnifier_morph = None;
                 state.cursor = Some(pt);
                 state.hover_button = None;
                 state.resize_drag = None;
@@ -3121,6 +3183,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 } else {
                     None
                 };
+                let morph_from = magnifier_panel_rect(state);
                 let frozen = state.toolbar_freeze.take();
                 state.resize_drag = None;
                 state.move_drag = None;
@@ -3149,6 +3212,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             },
                             start: Instant::now(),
                         });
+                        if !adjusting && current_options().magnifier_enabled {
+                            if let Some(from) = morph_from {
+                                state.magnifier_morph = Some(MagnifierMorph {
+                                    from,
+                                    to: target,
+                                    start: Instant::now(),
+                                });
+                            }
+                        }
                         unsafe {
                             let _ = SetTimer(state.hwnd, TOOLBAR_TIMER_ID, 16, None);
                         }
@@ -3156,6 +3228,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         state.toolbar_motion = None;
                     }
                 } else {
+                    if !adjusting && current_options().magnifier_enabled {
+                        if let (Some(from), Some(target)) =
+                            (morph_from, toolbar_target_rect(state))
+                        {
+                            state.magnifier_morph = Some(MagnifierMorph {
+                                from,
+                                to: target,
+                                start: Instant::now(),
+                            });
+                        }
+                    }
                     sync_toolbar_motion(state);
                 }
                 Ok(adjusting)
