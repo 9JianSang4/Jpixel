@@ -123,19 +123,6 @@
 
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">默认操作</div>
-            <p class="setting-desc">双击或按 Enter 时执行的操作。</p>
-          </div>
-          <SettingsSelect
-            v-model="defaultAction"
-            :options="defaultActionOptions"
-            aria-label="默认操作"
-            @change="onDefaultActionChange"
-          />
-        </div>
-
-        <div class="setting-row">
-          <div class="setting-info">
             <div class="setting-label">十字辅助线</div>
             <p class="setting-desc">在光标处显示横向/纵向辅助线，方便对齐边缘。</p>
           </div>
@@ -340,8 +327,6 @@ import {
   setPinHotkey,
   getPinLimit,
   setPinLimit,
-  getDefaultAction,
-  setDefaultAction,
   getCrosshairGuides,
   setCrosshairGuides,
   getSelectionMode,
@@ -384,6 +369,10 @@ const features = [
     description: "Alt+X 冻结当前屏幕，拖拽框选区域；支持双击防误触和辅助线。",
   },
   {
+    title: "放大镜取色",
+    description: "框选时显示像素放大镜和 HEX/RGB 色值；按 C 直接复制颜色。",
+  },
+  {
     title: "原生标注",
     description: "左键画笔、右键橡皮；滚轮换色，Ctrl+滚轮调透明度，支持撤销/重做。",
   },
@@ -411,25 +400,12 @@ const screenshotHotkey = ref("Alt+X");
 const copyHotkey = ref("Ctrl+C");
 const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
-const defaultAction = ref("save_and_edit");
 const crosshairGuides = ref(true);
 const selectionMode = ref("reselect");
 const doublePressSpeed = ref("normal");
 const pinLimit = ref("eight");
 const recordingMode = ref<string | null>(null);
 const hotkeyError = ref<string | null>(null);
-
-const actionLabels: Record<string, string> = {
-  save_and_edit: "保存并编辑",
-  copy: "复制到剪贴板",
-  save: "保存文件",
-  pin: "贴图",
-};
-
-const defaultActionOptions = Object.entries(actionLabels).map(([value, label]) => ({
-  value,
-  label,
-}));
 
 const selectionModeOptions = [
   { value: "reselect", label: "拖动重选" },
@@ -464,7 +440,6 @@ onMounted(async () => {
     copyHotkey.value = await getCopyHotkey();
     saveHotkey.value = await getSaveHotkey();
     pinHotkey.value = await getPinHotkey();
-    defaultAction.value = await getDefaultAction();
     crosshairGuides.value = await getCrosshairGuides();
     selectionMode.value = await getSelectionMode();
     doublePressSpeed.value = await getDoublePressSpeed();
@@ -483,12 +458,6 @@ function onAutoLaunchChange() {
 function onToggle() {
   setDoublePressEnabled(doublePress.value).catch((err: unknown) => {
     console.error("Failed to set double press:", err);
-  });
-}
-
-function onDefaultActionChange() {
-  setDefaultAction(defaultAction.value).catch((err: unknown) => {
-    console.error("Failed to set default action:", err);
   });
 }
 

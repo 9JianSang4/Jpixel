@@ -170,8 +170,6 @@ pub fn run() {
             config::set_selection_mode,
             config::get_double_press_speed,
             config::set_double_press_speed,
-            config::get_default_action,
-            config::set_default_action,
         ])
         .setup(move |app| {
             let app_handle = app.handle();

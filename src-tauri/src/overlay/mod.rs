@@ -24,10 +24,11 @@ use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteObject,
     DrawTextW, Ellipse, EndPaint, FillRect, GetStockObject, RestoreDC, RoundRect, SaveDC,
-    ScreenToClient, SelectClipRgn, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER,
-    DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_BRUSH, NULL_PEN,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
+    ScreenToClient, SelectClipRgn, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor,
+    StretchBlt, UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLORONCOLOR,
+    DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FW_BOLD,
+    FW_NORMAL, HDC, HGDIOBJ, HFONT, NULL_BRUSH, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -457,7 +458,10 @@ fn run(hotkey: crate::core::hotkey::Hotkey) -> Result<()> {
     crate::bubble::register_class()?;
     let monitors = monitor::enumerate()?;
     warm_up(&monitors);
-    register_hotkey(hotkey.vk, hotkey.mods, &hotkey.name)?;
+    if let Err(e) = register_hotkey(hotkey.vk, hotkey.mods, &hotkey.name) {
+        log::error!("cannot register startup hotkey {}: {e}", hotkey.name);
+        crate::bubble::show_hotkey_error(&hotkey.name);
+    }
     run_message_loop();
     Ok(())
 }
@@ -1451,8 +1455,202 @@ fn draw_crosshair(back: &Dib, state: &OverlayState) -> Result<()> {
     Ok(())
 }
 
-fn draw_handles(hdc: HDC, state: &OverlayState) -> Result<()> {
-    if current_options().selection_mode != SelectionMode::Resize {
+fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
+    if selection_rect(state).is_some() && !state.dragging {
+        return Ok(());
+    }
+    let (Some(cursor), Some(image), Some(bounds)) =
+        (state.cursor, state.original.as_ref(), image_bounds(state))
+    else {
+        return Ok(());
+    };
+    if cursor.x < bounds.left
+        || cursor.y < bounds.top
+        || cursor.x >= bounds.right
+        || cursor.y >= bounds.bottom
+    {
+        return Ok(());
+    }
+
+    const SOURCE: i32 = 15;
+    const IMAGE_SIZE: i32 = 144;
+    const PANEL_W: i32 = 164;
+    const PANEL_H: i32 = 196;
+    const PAD: i32 = 10;
+
+    let source_x = (cursor.x - SOURCE / 2)
+        .clamp(bounds.left, (bounds.right - SOURCE).max(bounds.left));
+    let source_y = (cursor.y - SOURCE / 2)
+        .clamp(bounds.top, (bounds.bottom - SOURCE).max(bounds.top));
+    let max_x = (bounds.right - PANEL_W).max(bounds.left);
+    let max_y = (bounds.bottom - PANEL_H).max(bounds.top);
+    let x = if cursor.x + 18 + PANEL_W <= bounds.right {
+        cursor.x + 18
+    } else {
+        (cursor.x - PANEL_W - 18).clamp(bounds.left, max_x)
+    };
+    let y = if cursor.y + 18 + PANEL_H <= bounds.bottom {
+        cursor.y + 18
+    } else {
+        (cursor.y - PANEL_H - 18).clamp(bounds.top, max_y)
+    };
+    let x = x.clamp(bounds.left, max_x);
+    let y = y.clamp(bounds.top, max_y);
+    let Some((r, g, b)) = image.pixel_rgb(cursor.x, cursor.y) else {
+        return Ok(());
+    };
+
+    unsafe {
+        let background = CreateSolidBrush(rgb(28, 28, 30));
+        let old_brush = SelectObject(hdc, HGDIOBJ(background.0));
+        let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+        let _ = RoundRect(hdc, x, y, x + PANEL_W, y + PANEL_H, 12, 12);
+        let _ = SelectObject(hdc, old_pen);
+        let _ = SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(background.0));
+
+        let _ = SetStretchBltMode(hdc, COLORONCOLOR);
+        let _ = StretchBlt(
+            hdc,
+            x + PAD,
+            y + PAD,
+            IMAGE_SIZE,
+            IMAGE_SIZE,
+            image.hdc(),
+            source_x,
+            source_y,
+            SOURCE,
+            SOURCE,
+            SRCCOPY,
+        );
+
+        let cross = CreateSolidBrush(rgb(255, 255, 255));
+        let center_x = x + PAD + IMAGE_SIZE / 2;
+        let center_y = y + PAD + IMAGE_SIZE / 2;
+        let _ = FillRect(
+            hdc,
+            &RECT {
+                left: center_x - 1,
+                top: y + PAD,
+                right: center_x + 1,
+                bottom: y + PAD + IMAGE_SIZE,
+            },
+            cross,
+        );
+        let _ = FillRect(
+            hdc,
+            &RECT {
+                left: x + PAD,
+                top: center_y - 1,
+                right: x + PAD + IMAGE_SIZE,
+                bottom: center_y + 1,
+            },
+            cross,
+        );
+        let _ = DeleteObject(HGDIOBJ(cross.0));
+
+        let swatch = CreateSolidBrush(rgb(r, g, b));
+        let _ = FillRect(
+            hdc,
+            &RECT {
+                left: x + PAD + 2,
+                top: y + PAD + IMAGE_SIZE + 8,
+                right: x + PAD + 14,
+                bottom: y + PAD + IMAGE_SIZE + 20,
+            },
+            swatch,
+        );
+        let _ = DeleteObject(HGDIOBJ(swatch.0));
+
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let font = CreateFontW(
+            -14,
+            0,
+            0,
+            0,
+            FW_BOLD.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            0,
+            CLEARTYPE_QUALITY.0 as u32,
+            DEFAULT_PITCH.0 as u32,
+            w!("Microsoft YaHei UI"),
+        );
+        let old_font = SelectObject(hdc, HGDIOBJ(font.0));
+        let _ = SetTextColor(hdc, rgb(245, 245, 248));
+        let mut hex: Vec<u16> = format!("#{r:02X}{g:02X}{b:02X}")
+            .encode_utf16()
+            .collect();
+        let mut hex_rect = RECT {
+            left: x + PAD + 20,
+            top: y + PAD + IMAGE_SIZE + 4,
+            right: x + PANEL_W - PAD,
+            bottom: y + PAD + IMAGE_SIZE + 24,
+        };
+        let _ = DrawTextW(
+            hdc,
+            &mut hex,
+            &mut hex_rect,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+
+        let small = CreateFontW(
+            -12,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            0,
+            CLEARTYPE_QUALITY.0 as u32,
+            DEFAULT_PITCH.0 as u32,
+            w!("Microsoft YaHei UI"),
+        );
+        let _ = SelectObject(hdc, HGDIOBJ(small.0));
+        let _ = SetTextColor(hdc, rgb(184, 184, 192));
+        let mut rgb_text: Vec<u16> = format!("R {r}   G {g}   B {b}")
+            .encode_utf16()
+            .collect();
+        let mut rgb_rect = RECT {
+            left: x + PAD,
+            top: y + PANEL_H - 24,
+            right: x + PANEL_W - 48,
+            bottom: y + PANEL_H - 6,
+        };
+        let _ = DrawTextW(
+            hdc,
+            &mut rgb_text,
+            &mut rgb_rect,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        let mut hint: Vec<u16> = "C 复制".encode_utf16().collect();
+        let mut hint_rect = RECT {
+            left: x + PANEL_W - 52,
+            top: y + PANEL_H - 24,
+            right: x + PANEL_W - PAD,
+            bottom: y + PANEL_H - 6,
+        };
+        let _ = DrawTextW(
+            hdc,
+            &mut hint,
+            &mut hint_rect,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        let _ = SelectObject(hdc, old_font);
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        let _ = DeleteObject(HGDIOBJ(small.0));
+    }
+    Ok(())
+}
+
+fn draw_handles(hdc: HDC, state: &OverlayState) -> Result<()> {    if current_options().selection_mode != SelectionMode::Resize {
         return Ok(());
     }
     unsafe {
@@ -2156,6 +2354,30 @@ pub fn hide_overlay() {
     reregister_hotkey();
 }
 
+fn cursor_color() -> Option<(u8, u8, u8)> {
+    with_state(|state| {
+        let cursor = state.cursor?;
+        let image = state.original.as_ref()?;
+        image.pixel_rgb(cursor.x, cursor.y)
+    })
+    .ok()
+    .flatten()
+}
+
+fn copy_cursor_color() {
+    let Some((r, g, b)) = cursor_color() else {
+        return;
+    };
+    let hex = format!("#{r:02X}{g:02X}{b:02X}");
+    match Clipboard::new() {
+        Ok(mut clipboard) => match clipboard.set_text(hex.clone()) {
+            Ok(()) => log::info!("copied color {hex}"),
+            Err(e) => log::error!("copy color failed: {e}"),
+        },
+        Err(e) => log::error!("open clipboard for color copy failed: {e}"),
+    }
+}
+
 fn copy_and_close() {
     match copy_current_selection() {
         Ok(copy) => {
@@ -2379,6 +2601,7 @@ fn paint(hwnd: HWND) {
                 if let Err(e) =
                     gdi::paint_overlay(hwnd, back, dimmed, original, selection_rect(state), |hdc| {
                         draw_crosshair(back, state)?;
+                        draw_magnifier(hdc, state)?;
                         draw_handles(hdc, state)?;
                         draw_eraser_cursor(hdc, state)?;
                         draw_toolbar(hdc, back, state)?;
@@ -2878,6 +3101,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 save_and_close();
             } else if options.pin_hotkey.matches(key, mods) {
                 pin_and_close();
+            } else if key == 0x43 && mods == 0 {
+                copy_cursor_color();
             }
             LRESULT(0)
         }

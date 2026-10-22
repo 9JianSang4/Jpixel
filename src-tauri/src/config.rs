@@ -28,8 +28,6 @@ pub struct AppConfig {
     pub pin_limit: PinLimit,
     #[serde(default)]
     pub auto_launch: bool,
-    #[serde(default)]
-    pub default_action: DefaultAction,
     #[serde(default = "default_crosshair_guides")]
     pub crosshair_guides: bool,
     #[serde(default)]
@@ -76,21 +74,6 @@ impl Default for PinLimit {
         PinLimit::Eight
     }
 }
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum DefaultAction {
-    SaveAndEdit,
-    Copy,
-    Save,
-    Pin,
-}
-
-impl Default for DefaultAction {
-    fn default() -> Self {
-        DefaultAction::SaveAndEdit
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionMode {
@@ -140,7 +123,6 @@ impl Default for AppConfig {
             pin_hotkey: "Ctrl+T".to_string(),
             pin_limit: PinLimit::Eight,
             auto_launch: false,
-            default_action: DefaultAction::SaveAndEdit,
             crosshair_guides: true,
             selection_mode: SelectionMode::Reselect,
             double_press_speed: DoublePressSpeed::Normal,
@@ -260,23 +242,6 @@ macro_rules! config_getter {
     };
 }
 
-macro_rules! config_setter {
-    ($name:ident, $field:ident, $ty:ty) => {
-        #[tauri::command]
-        pub fn $name(
-            app: AppHandle,
-            config: State<ConfigArc>,
-            value: $ty,
-        ) -> Result<(), JpixelError> {
-            let mut cfg = crate::config::lock_or_warn!(config);
-            cfg.$field = value;
-            let clone = cfg.clone();
-            drop(cfg);
-            save_config(&app, &clone)
-        }
-    };
-}
-
 config_getter!(get_double_press_enabled, double_press_enabled, bool);
 
 #[tauri::command]
@@ -298,9 +263,6 @@ config_getter!(get_copy_hotkey, copy_hotkey, String);
 config_getter!(get_save_hotkey, save_hotkey, String);
 config_getter!(get_pin_hotkey, pin_hotkey, String);
 config_getter!(get_pin_limit, pin_limit, PinLimit);
-
-config_getter!(get_default_action, default_action, DefaultAction);
-config_setter!(set_default_action, default_action, DefaultAction);
 
 config_getter!(get_auto_launch, auto_launch, bool);
 config_getter!(get_crosshair_guides, crosshair_guides, bool);
@@ -562,7 +524,6 @@ mod tests {
         assert_eq!(cfg.save_hotkey, "Ctrl+S");
         assert_eq!(cfg.pin_hotkey, "Ctrl+T");
         assert_eq!(cfg.pin_limit, PinLimit::Eight);
-        assert_eq!(cfg.default_action, DefaultAction::SaveAndEdit);
     }
 
     #[test]
@@ -574,17 +535,11 @@ mod tests {
     }
 
     #[test]
-    fn default_action_default_is_save_and_edit() {
-        assert_eq!(DefaultAction::default(), DefaultAction::SaveAndEdit);
-    }
-
-    #[test]
     fn config_serde_roundtrip() {
         let cfg = AppConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg.screenshot_hotkey, restored.screenshot_hotkey);
-        assert_eq!(cfg.default_action, restored.default_action);
     }
 
     #[test]
@@ -593,7 +548,6 @@ mod tests {
         let cfg: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.screenshot_hotkey, "F2");
         assert_eq!(cfg.copy_hotkey, "Ctrl+C"); // default
-        assert_eq!(cfg.default_action, DefaultAction::SaveAndEdit); // default
     }
 
     #[test]

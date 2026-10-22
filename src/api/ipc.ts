@@ -97,11 +97,3 @@ export async function setSelectionMode(mode: SelectionMode): Promise<void> {
   return invoke("set_selection_mode", { value: mode });
 }
 
-export async function getDefaultAction(): Promise<string> {
-  return invoke("get_default_action");
-}
-
-export async function setDefaultAction(action: string): Promise<void> {
-  return invoke("set_default_action", { value: action });
-}
-

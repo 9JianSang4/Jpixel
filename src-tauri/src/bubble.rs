@@ -75,6 +75,36 @@ pub fn register_class() -> Result<()> {
 }
 
 pub fn show_pin_limit(limit: usize, anchor_x: i32, anchor_top: i32, anchor_bottom: i32) {
+    show_toast(
+        "贴图数量已达上限",
+        format!(
+            "当前上限 {limit} 张。再按一次贴图快捷键，或点击托盘图标，确认关闭最早的一张并继续。"
+        ),
+        anchor_x,
+        anchor_top,
+        anchor_bottom,
+    );
+}
+
+pub fn show_hotkey_error(name: &str) {
+    show_toast(
+        "截图快捷键不可用",
+        format!(
+            "无法注册 {name}，可能已被其他程序占用。请打开托盘菜单 → 设置，换一个快捷键。"
+        ),
+        0,
+        0,
+        0,
+    );
+}
+
+fn show_toast(
+    title: &str,
+    body: String,
+    anchor_x: i32,
+    anchor_top: i32,
+    anchor_bottom: i32,
+) {
     let previous = BUBBLE_HWND.load(Ordering::SeqCst);
     if previous != 0 {
         unsafe {
@@ -182,10 +212,8 @@ pub fn show_pin_limit(limit: usize, anchor_x: i32, anchor_top: i32, anchor_botto
             w!("Microsoft YaHei UI"),
         );
         let state = Box::new(BubbleState {
-            title: "贴图数量已达上限".to_string(),
-            body: format!(
-                "当前上限 {limit} 张。再按一次贴图快捷键，或点击托盘图标，确认关闭最早的一张并继续。"
-            ),
+            title: title.to_string(),
+            body,
             x,
             target_y,
             started: Instant::now(),

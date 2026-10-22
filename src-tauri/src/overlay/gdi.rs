@@ -173,6 +173,16 @@ impl Dib {
         self.hdc
     }
 
+    /// Read one pixel from the DIB. Used by the magnifier color picker.
+    pub fn pixel_rgb(&self, x: i32, y: i32) -> Option<(u8, u8, u8)> {
+        if x < 0 || y < 0 || x >= self.width || y >= self.height {
+            return None;
+        }
+        let offset = ((y as usize * self.width as usize) + x as usize) * 4;
+        let px = unsafe { std::slice::from_raw_parts(self.bits.add(offset), 4) };
+        Some((px[2], px[1], px[0]))
+    }
+
     /// Blend a horizontal 1px line into this BGRA DIB. Used for the soft
     /// crosshair guides; GDI pens cannot express per-pixel alpha here.
     pub fn blend_hline(&self, y: i32, x0: i32, x1: i32, color: (u8, u8, u8), alpha: u8) {
@@ -295,5 +305,21 @@ fn draw_border(hdc: HDC, rect: &RECT) {
 pub fn invalidate(hwnd: HWND) {
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    #[test]
+    fn pixel_rgb_reads_bgra_pixels_and_bounds() {
+        let image = RgbaImage::from_pixel(2, 2, Rgba([10, 20, 30, 255]));
+        let dib = Dib::from_rgba(&image).expect("dib");
+        assert_eq!(dib.pixel_rgb(0, 0), Some((10, 20, 30)));
+        assert_eq!(dib.pixel_rgb(1, 1), Some((10, 20, 30)));
+        assert_eq!(dib.pixel_rgb(-1, 0), None);
+        assert_eq!(dib.pixel_rgb(2, 0), None);
     }
 }
