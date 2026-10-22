@@ -358,7 +358,7 @@ import {
 import { formatHotkey } from "../utils/hotkey";
 import SettingsSelect from "../components/SettingsSelect.vue";
 
-const version = "2.0.0";
+const version = "2.0.1";
 const activeSection = ref("general");
 
 const sectionMeta = computed(() => {

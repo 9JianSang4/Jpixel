@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-2.0.0-2f6fed" />
+  <img alt="version" src="https://img.shields.io/badge/version-2.0.1-2f6fed" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-2f6fed" />
   <img alt="tech" src="https://img.shields.io/badge/Rust%20%2B%20Win32-native-2f6fed" />
 </p>
@@ -22,7 +22,7 @@ Jpixel 是一个面向 Windows 的轻量截图工具。
 
 截图、框选、标注、贴图等高频操作全部由 **Rust + Win32/GDI/GDI+** 原生实现；Vue 只负责按需加载的设置界面。没有 WebView 截图遮罩，没有额外的渲染进程，启动和截图响应都更直接。
 
-当前版本：**2.0.0**
+当前版本：**2.0.1**
 
 - NSIS 安装包约 **1.27 MB**
 - MSI 安装包约 **2.02 MB**
@@ -149,8 +149,8 @@ npm run tauri build
 产物：
 
 ```text
-src-tauri/target/release/bundle/nsis/jpixel_2.0.0_x64-setup.exe
-src-tauri/target/release/bundle/msi/jpixel_2.0.0_x64_en-US.msi
+src-tauri/target/release/bundle/nsis/jpixel_2.0.1_x64-setup.exe
+src-tauri/target/release/bundle/msi/jpixel_2.0.1_x64_en-US.msi
 ```
 
 ### 测试
@@ -169,7 +169,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --offline --locked
 
 ## 状态
 
-- 版本：2.0.0
+- 版本：2.0.1
 - 主要平台：Windows x64
 - 已知限制：贴图缩放以鼠标为锚点，窗口靠近屏幕边缘放大时可能超出可视区域，可拖动调整。
 
