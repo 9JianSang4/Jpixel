@@ -963,6 +963,67 @@ fn rects_intersect(a: RECT, b: RECT) -> bool {
     a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
 }
 
+fn rect_union(a: RECT, b: RECT) -> RECT {
+    RECT {
+        left: a.left.min(b.left),
+        top: a.top.min(b.top),
+        right: a.right.max(b.right),
+        bottom: a.bottom.max(b.bottom),
+    }
+}
+
+fn rect_expand(rect: RECT, amount: i32) -> RECT {
+    RECT {
+        left: rect.left - amount,
+        top: rect.top - amount,
+        right: rect.right + amount,
+        bottom: rect.bottom + amount,
+    }
+}
+
+fn point_rect(point: POINT, width: i32, height: i32) -> RECT {
+    RECT {
+        left: point.x,
+        top: point.y,
+        right: point.x + width,
+        bottom: point.y + height,
+    }
+}
+
+fn toolbar_dirty_rect(state: &OverlayState) -> Option<RECT> {
+    let mut dirty = toolbar_rect(state);
+    if let Some(motion) = state.toolbar_motion.as_ref() {
+        let from = point_rect(motion.from, TOOLBAR_W, TOOLBAR_H);
+        let to = point_rect(motion.to, TOOLBAR_W, TOOLBAR_H);
+        let motion_rect = rect_union(from, to);
+        dirty = Some(dirty.map(|rect| rect_union(rect, motion_rect)).unwrap_or(motion_rect));
+    }
+    if let Some(morph) = state.magnifier_morph.as_ref() {
+        let morph_rect = rect_union(morph.from, morph.to);
+        dirty = Some(dirty.map(|rect| rect_union(rect, morph_rect)).unwrap_or(morph_rect));
+    }
+    dirty.map(|rect| rect_expand(rect, 8))
+}
+
+fn magnifier_dirty_rect(state: &OverlayState) -> Option<RECT> {
+    let mut dirty = magnifier_panel_rect(state);
+    if let Some(motion) = state.magnifier_motion.as_ref() {
+        let from = point_rect(motion.from, MAG_PANEL_W, MAG_PANEL_H);
+        let to = point_rect(motion.to, MAG_PANEL_W, MAG_PANEL_H);
+        dirty = Some(dirty.map(|rect| rect_union(rect, from)).unwrap_or(from));
+        dirty = Some(dirty.map(|rect| rect_union(rect, to)).unwrap_or(to));
+    }
+    dirty.map(|rect| rect_expand(rect, 6))
+}
+
+fn invalidate_dirty(hwnd: HWND, dirty: Option<RECT>) {
+    if let Some(rect) = dirty {
+        gdi::invalidate_rect(hwnd, &rect);
+    } else {
+        gdi::invalidate(hwnd);
+    }
+}
+
 fn toolbar_outside_selection(selection: RECT, screen_w: i32, screen_h: i32, current: RECT) -> RECT {
     let margin = TOOLBAR_OFFSET;
     let min_x = 4;
@@ -3046,6 +3107,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         .unwrap_or(true)
                 })
                 .unwrap_or(true);
+                let dirty = with_state(toolbar_dirty_rect).ok().flatten();
                 if done {
                     unsafe {
                         let _ = KillTimer(hwnd, TOOLBAR_TIMER_ID);
@@ -3055,7 +3117,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         Ok(())
                     });
                 }
-                gdi::invalidate(hwnd);
+                invalidate_dirty(hwnd, dirty);
             } else if wparam.0 == COLOR_COPY_TIMER_ID {
                 unsafe {
                     let _ = KillTimer(hwnd, COLOR_COPY_TIMER_ID);
@@ -3078,6 +3140,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         .unwrap_or(true)
                 })
                 .unwrap_or(true);
+                let dirty = with_state(magnifier_dirty_rect).ok().flatten();
                 if done {
                     unsafe {
                         let _ = KillTimer(hwnd, MAGNIFIER_TIMER_ID);
@@ -3087,7 +3150,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         Ok(())
                     });
                 }
-                gdi::invalidate(hwnd);
+                invalidate_dirty(hwnd, dirty);
             }
             LRESULT(0)
         }

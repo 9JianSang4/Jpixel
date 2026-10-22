@@ -13,9 +13,9 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreatePen, DeleteDC, DeleteObject,
-    EndPaint, GetStockObject, InvalidateRect, Rectangle, SelectObject, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, NULL_BRUSH, PAINTSTRUCT,
-    PS_SOLID, SRCCOPY,
+    EndPaint, GetStockObject, IntersectClipRect, InvalidateRect, Rectangle, RestoreDC, SaveDC,
+    SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
+    NULL_BRUSH, PAINTSTRUCT, PS_SOLID, SRCCOPY,
 };
 
 const DIM_FACTOR: f32 = 0.55;
@@ -165,10 +165,6 @@ impl Dib {
         Ok(dib)
     }
 
-    pub fn blit(&self, dst: HDC, x: i32, y: i32) -> Result<()> {
-        self.blit_region(dst, x, y, self.width, self.height, 0, 0)
-    }
-
     pub fn hdc(&self) -> HDC {
         self.hdc
     }
@@ -265,25 +261,76 @@ pub fn paint_overlay<F>(
 where
     F: FnOnce(HDC) -> Result<()>,
 {
-    // Compose into the back buffer first: one BitBlt to the window DC avoids
-    // the progressive repaint flicker caused by drawing the dim image, the
-    // selection and the border directly to the window.
-    dimmed.blit(back.hdc(), 0, 0)?;
+    let mut ps = PAINTSTRUCT::default();
+    let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+    let dirty = ps.rcPaint;
+    let width = dirty.right - dirty.left;
+    let height = dirty.bottom - dirty.top;
+    if width <= 0 || height <= 0 {
+        unsafe {
+            let _ = EndPaint(hwnd, &ps);
+        }
+        return Ok(());
+    }
+
+    // Only recompose the invalid rectangle. Crosshair movement still asks for
+    // a full invalidate, but toolbar/magnifier animations can repaint a small
+    // region instead of copying the whole monitor every 16 ms.
+    dimmed.blit_region(
+        back.hdc(),
+        dirty.left,
+        dirty.top,
+        width,
+        height,
+        dirty.left,
+        dirty.top,
+    )?;
 
     if let Some(rect) = selection {
-        let w = rect.right - rect.left;
-        let h = rect.bottom - rect.top;
-        if w > 0 && h > 0 {
-            original.blit_region(back.hdc(), rect.left, rect.top, w, h, rect.left, rect.top)?;
-            draw_border(back.hdc(), &rect);
+        let left = rect.left.max(dirty.left);
+        let top = rect.top.max(dirty.top);
+        let right = rect.right.min(dirty.right);
+        let bottom = rect.bottom.min(dirty.bottom);
+        if right > left && bottom > top {
+            original.blit_region(
+                back.hdc(),
+                left,
+                top,
+                right - left,
+                bottom - top,
+                left,
+                top,
+            )?;
         }
     }
 
+    let saved = unsafe { SaveDC(back.hdc()) };
+    unsafe {
+        let _ = IntersectClipRect(
+            back.hdc(),
+            dirty.left,
+            dirty.top,
+            dirty.right,
+            dirty.bottom,
+        );
+    }
+    if let Some(rect) = selection {
+        draw_border(back.hdc(), &rect);
+    }
     draw_extra(back.hdc())?;
+    unsafe {
+        let _ = RestoreDC(back.hdc(), saved);
+    }
 
-    let mut ps = PAINTSTRUCT::default();
-    let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-    back.blit(hdc, 0, 0)?;
+    back.blit_region(
+        hdc,
+        dirty.left,
+        dirty.top,
+        width,
+        height,
+        dirty.left,
+        dirty.top,
+    )?;
     unsafe {
         let _ = EndPaint(hwnd, &ps);
     }
@@ -305,6 +352,12 @@ fn draw_border(hdc: HDC, rect: &RECT) {
 pub fn invalidate(hwnd: HWND) {
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+pub fn invalidate_rect(hwnd: HWND, rect: &RECT) {
+    unsafe {
+        let _ = InvalidateRect(hwnd, Some(rect), false);
     }
 }
 
