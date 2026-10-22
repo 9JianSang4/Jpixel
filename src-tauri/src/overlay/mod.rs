@@ -251,6 +251,8 @@ const TOOLBAR_ANIM_OFFSET: i32 = 8;
 const TOOLBAR_TIMER_ID: usize = 0x52;
 const COLOR_COPY_TIMER_ID: usize = 0x53;
 const HOTKEY_RETRY_TIMER_ID: usize = 0x54;
+const MAGNIFIER_TIMER_ID: usize = 0x55;
+const MAGNIFIER_SLIDE_MS: u128 = 100;
 const MAG_PANEL_W: i32 = 200;
 const MAG_PANEL_H: i32 = 232;
 const MAG_IMAGE_SIZE: i32 = 152;
@@ -267,6 +269,20 @@ struct ToolbarMotion {
 struct MagnifierMorph {
     from: RECT,
     to: RECT,
+    start: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MagnifierSide {
+    Above,
+    Below,
+    Left,
+    Right,
+}
+
+struct MagnifierMotion {
+    from: POINT,
+    to: POINT,
     start: Instant,
 }
 
@@ -315,6 +331,8 @@ struct OverlayState {
     color_copied: Option<Instant>,
     magnifier_morph: Option<MagnifierMorph>,
     magnifier_consumed: bool,
+    magnifier_side: MagnifierSide,
+    magnifier_motion: Option<MagnifierMotion>,
 }
 
 impl OverlayState {
@@ -364,6 +382,8 @@ impl OverlayState {
             color_copied: None,
             magnifier_morph: None,
             magnifier_consumed: false,
+            magnifier_side: MagnifierSide::Above,
+            magnifier_motion: None,
         }
     }
 }
@@ -815,6 +835,8 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.color_copied = None;
         state.magnifier_morph = None;
         state.magnifier_consumed = false;
+        state.magnifier_side = MagnifierSide::Above;
+        state.magnifier_motion = None;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -1526,62 +1548,187 @@ fn draw_crosshair(back: &Dib, state: &OverlayState) -> Result<()> {
     Ok(())
 }
 
-fn magnifier_panel_rect(state: &OverlayState) -> Option<RECT> {
+fn magnifier_candidate(state: &OverlayState, side: MagnifierSide) -> Option<RECT> {
     let cursor = state.cursor?;
     let bounds = image_bounds(state)?;
-    if cursor.x < bounds.left
-        || cursor.y < bounds.top
-        || cursor.x >= bounds.right
-        || cursor.y >= bounds.bottom
-    {
-        return None;
-    }
+    let selection = selection_rect(state);
+    let margin = 12;
+    let cursor_gap = 18;
+    let (left, top) = match (selection, side) {
+        (Some(selection), MagnifierSide::Above) => (
+            cursor.x - MAG_PANEL_W / 2,
+            selection.top - MAG_PANEL_H - margin,
+        ),
+        (Some(selection), MagnifierSide::Below) => (
+            cursor.x - MAG_PANEL_W / 2,
+            selection.bottom + margin,
+        ),
+        (Some(selection), MagnifierSide::Left) => (
+            selection.left - MAG_PANEL_W - margin,
+            cursor.y - MAG_PANEL_H / 2,
+        ),
+        (Some(selection), MagnifierSide::Right) => (
+            selection.right + margin,
+            cursor.y - MAG_PANEL_H / 2,
+        ),
+        (None, MagnifierSide::Above) => (
+            cursor.x - MAG_PANEL_W / 2,
+            cursor.y - MAG_PANEL_H - cursor_gap,
+        ),
+        (None, MagnifierSide::Below) => (
+            cursor.x - MAG_PANEL_W / 2,
+            cursor.y + cursor_gap,
+        ),
+        (None, MagnifierSide::Left) => (
+            cursor.x - MAG_PANEL_W - cursor_gap,
+            cursor.y - MAG_PANEL_H / 2,
+        ),
+        (None, MagnifierSide::Right) => (
+            cursor.x + cursor_gap,
+            cursor.y - MAG_PANEL_H / 2,
+        ),
+    };
     let max_x = (bounds.right - MAG_PANEL_W).max(bounds.left);
     let max_y = (bounds.bottom - MAG_PANEL_H).max(bounds.top);
-    let desired = RECT {
-        left: (cursor.x - MAG_PANEL_W / 2).clamp(bounds.left, max_x),
-        top: (cursor.y - MAG_PANEL_H - 20).clamp(bounds.top, max_y),
+    let rect = RECT {
+        left: left.clamp(bounds.left, max_x),
+        top: top.clamp(bounds.top, max_y),
         right: 0,
         bottom: 0,
     };
-    let desired = RECT {
-        left: desired.left,
-        top: desired.top,
-        right: desired.left + MAG_PANEL_W,
-        bottom: desired.top + MAG_PANEL_H,
+    let rect = RECT {
+        left: rect.left,
+        top: rect.top,
+        right: rect.left + MAG_PANEL_W,
+        bottom: rect.top + MAG_PANEL_H,
     };
-    if let Some(selection) = selection_rect(state) {
-        let margin = 12;
-        let candidates = [
-            (cursor.x - MAG_PANEL_W / 2, selection.top - MAG_PANEL_H - margin),
-            (cursor.x - MAG_PANEL_W / 2, selection.bottom + margin),
-            (selection.right + margin, cursor.y - MAG_PANEL_H / 2),
-            (selection.left - MAG_PANEL_W - margin, cursor.y - MAG_PANEL_H / 2),
-        ];
-        for (left, top) in candidates {
-            let candidate = RECT {
-                left: left.clamp(bounds.left, max_x),
-                top: top.clamp(bounds.top, max_y),
-                right: 0,
-                bottom: 0,
-            };
-            let candidate = RECT {
-                left: candidate.left,
-                top: candidate.top,
-                right: candidate.left + MAG_PANEL_W,
-                bottom: candidate.top + MAG_PANEL_H,
-            };
-            if candidate.left >= bounds.left
-                && candidate.top >= bounds.top
-                && candidate.right <= bounds.right
-                && candidate.bottom <= bounds.bottom
-                && !rects_intersect(candidate, selection)
-            {
-                return Some(candidate);
+    if rect.left < bounds.left
+        || rect.top < bounds.top
+        || rect.right > bounds.right
+        || rect.bottom > bounds.bottom
+    {
+        return None;
+    }
+    if let Some(selection) = selection {
+        if rects_intersect(rect, selection) {
+            return None;
+        }
+    }
+    Some(rect)
+}
+
+fn magnifier_side_space(state: &OverlayState, side: MagnifierSide) -> i32 {
+    let Some(cursor) = state.cursor else {
+        return 0;
+    };
+    let Some(bounds) = image_bounds(state) else {
+        return 0;
+    };
+    let anchor = selection_rect(state);
+    match side {
+        MagnifierSide::Above => anchor.map(|r| r.top).unwrap_or(cursor.y) - bounds.top,
+        MagnifierSide::Below => bounds.bottom - anchor.map(|r| r.bottom).unwrap_or(cursor.y),
+        MagnifierSide::Left => anchor.map(|r| r.left).unwrap_or(cursor.x) - bounds.left,
+        MagnifierSide::Right => bounds.right - anchor.map(|r| r.right).unwrap_or(cursor.x),
+    }
+}
+
+fn magnifier_best_side(state: &OverlayState) -> MagnifierSide {
+    let order = [
+        MagnifierSide::Above,
+        MagnifierSide::Below,
+        MagnifierSide::Right,
+        MagnifierSide::Left,
+    ];
+    let mut best = state.magnifier_side;
+    let mut best_space = -1;
+    for side in order {
+        if magnifier_candidate(state, side).is_some() {
+            let space = magnifier_side_space(state, side);
+            if space > best_space {
+                best = side;
+                best_space = space;
             }
         }
     }
-    Some(desired)
+    best
+}
+
+fn magnifier_fallback_rect(state: &OverlayState) -> Option<RECT> {
+    let cursor = state.cursor?;
+    let bounds = image_bounds(state)?;
+    let max_x = (bounds.right - MAG_PANEL_W).max(bounds.left);
+    let max_y = (bounds.bottom - MAG_PANEL_H).max(bounds.top);
+    let left = (cursor.x - MAG_PANEL_W / 2).clamp(bounds.left, max_x);
+    let top = (cursor.y - MAG_PANEL_H - 18).clamp(bounds.top, max_y);
+    Some(RECT {
+        left,
+        top,
+        right: left + MAG_PANEL_W,
+        bottom: top + MAG_PANEL_H,
+    })
+}
+
+fn magnifier_panel_rect(state: &OverlayState) -> Option<RECT> {
+    let target = magnifier_candidate(state, state.magnifier_side)
+        .or_else(|| magnifier_fallback_rect(state))?;
+    if let Some(motion) = state.magnifier_motion.as_ref() {
+        if motion.start.elapsed().as_millis() < MAGNIFIER_SLIDE_MS {
+            let t = (motion.start.elapsed().as_millis() as f32 / MAGNIFIER_SLIDE_MS as f32)
+                .clamp(0.0, 1.0);
+            let eased = ease_out_cubic(t);
+            let left = motion.from.x + ((motion.to.x - motion.from.x) as f32 * eased) as i32;
+            let top = motion.from.y + ((motion.to.y - motion.from.y) as f32 * eased) as i32;
+            return Some(RECT {
+                left,
+                top,
+                right: left + MAG_PANEL_W,
+                bottom: top + MAG_PANEL_H,
+            });
+        }
+    }
+    Some(target)
+}
+
+fn update_magnifier_side(state: &mut OverlayState) {
+    if state.magnifier_consumed || !current_options().magnifier_enabled {
+        return;
+    }
+    if magnifier_candidate(state, state.magnifier_side).is_none() {
+        let best = magnifier_best_side(state);
+        if best != state.magnifier_side {
+            let from = magnifier_panel_rect(state)
+                .or_else(|| magnifier_candidate(state, state.magnifier_side))
+                .map(|rect| POINT {
+                    x: rect.left,
+                    y: rect.top,
+                });
+            state.magnifier_side = best;
+            if let (Some(from), Some(target)) =
+                (from, magnifier_candidate(state, best))
+            {
+                state.magnifier_motion = Some(MagnifierMotion {
+                    from,
+                    to: POINT {
+                        x: target.left,
+                        y: target.top,
+                    },
+                    start: Instant::now(),
+                });
+                unsafe {
+                    let _ = SetTimer(state.hwnd, MAGNIFIER_TIMER_ID, 16, None);
+                }
+            }
+        }
+    }
+    if let Some(target) = magnifier_candidate(state, state.magnifier_side) {
+        if let Some(motion) = state.magnifier_motion.as_mut() {
+            motion.to = POINT {
+                x: target.left,
+                y: target.top,
+            };
+        }
+    }
 }
 
 fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
@@ -2468,6 +2615,8 @@ pub fn hide_overlay() {
         state.color_copied = None;
         state.magnifier_morph = None;
         state.magnifier_consumed = false;
+        state.magnifier_side = MagnifierSide::Above;
+        state.magnifier_motion = None;
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
@@ -2892,6 +3041,27 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 gdi::invalidate(hwnd);
             } else if wparam.0 == HOTKEY_RETRY_TIMER_ID {
                 retry_startup_hotkey(hwnd);
+            } else if wparam.0 == MAGNIFIER_TIMER_ID {
+                let done = with_state(|state| {
+                    state
+                        .magnifier_motion
+                        .as_ref()
+                        .map(|motion| {
+                            motion.start.elapsed().as_millis() >= MAGNIFIER_SLIDE_MS
+                        })
+                        .unwrap_or(true)
+                })
+                .unwrap_or(true);
+                if done {
+                    unsafe {
+                        let _ = KillTimer(hwnd, MAGNIFIER_TIMER_ID);
+                    }
+                    let _ = with_state_mut(|state| {
+                        state.magnifier_motion = None;
+                        Ok(())
+                    });
+                }
+                gdi::invalidate(hwnd);
             }
             LRESULT(0)
         }
@@ -3177,6 +3347,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 Ok(())
             })
             .ok();
+            let _ = with_state_mut(|state| {
+                update_magnifier_side(state);
+                Ok(())
+            });
             // Always repaint on mouse movement: the crosshair guide must track
             // the cursor even when no selection/toolbar state changed.
             gdi::invalidate(hwnd);
