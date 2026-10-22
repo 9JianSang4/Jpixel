@@ -51,8 +51,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDC_SIZENWSE, IDC_SIZEWE, IDC_SIZEALL, MB_ICONERROR, MB_OK, MSG, SWP_NOMOVE, SWP_NOSIZE,
     SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY,
     WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 const HOTKEY_ID: i32 = 0x4A50; // "JP"
@@ -3653,6 +3653,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             })
             .ok();
             LRESULT(0)
+        }
+        WM_SYSKEYDOWN => {
+            // Holding Alt after the global hotkey makes Esc arrive as
+            // WM_SYSKEYDOWN. Without this, Alt+X → Esc never closes the overlay.
+            if wparam.0 as u32 == VK_ESCAPE.0 as u32 {
+                cancel_and_close();
+                LRESULT(0)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
         }
         WM_KEYDOWN => {
             let key = normalize_ime_key(wparam.0 as u32);
