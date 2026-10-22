@@ -139,6 +139,22 @@
 
         <div class="setting-row">
           <div class="setting-info">
+            <div class="setting-label">放大镜取色</div>
+            <p class="setting-desc">框选时显示像素放大镜和颜色值；按 C 复制 HEX 颜色。</p>
+          </div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              v-model="magnifierEnabled"
+              aria-label="放大镜取色"
+              @change="onMagnifierChange"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
             <div class="setting-label">选后操作</div>
             <p class="setting-desc">拖动重选保持十字准星；调整大小显示控制点。</p>
           </div>
@@ -329,6 +345,8 @@ import {
   setPinLimit,
   getCrosshairGuides,
   setCrosshairGuides,
+  getMagnifierEnabled,
+  setMagnifierEnabled,
   getSelectionMode,
   setSelectionMode,
   getDoublePressSpeed,
@@ -401,6 +419,7 @@ const copyHotkey = ref("Ctrl+C");
 const saveHotkey = ref("Ctrl+S");
 const pinHotkey = ref("Ctrl+T");
 const crosshairGuides = ref(true);
+const magnifierEnabled = ref(true);
 const selectionMode = ref("reselect");
 const doublePressSpeed = ref("normal");
 const pinLimit = ref("eight");
@@ -441,6 +460,7 @@ onMounted(async () => {
     saveHotkey.value = await getSaveHotkey();
     pinHotkey.value = await getPinHotkey();
     crosshairGuides.value = await getCrosshairGuides();
+    magnifierEnabled.value = await getMagnifierEnabled();
     selectionMode.value = await getSelectionMode();
     doublePressSpeed.value = await getDoublePressSpeed();
     pinLimit.value = await getPinLimit();
@@ -464,6 +484,12 @@ function onToggle() {
 function onCrosshairChange() {
   setCrosshairGuides(crosshairGuides.value).catch((err: unknown) => {
     console.error("Failed to set crosshair guides:", err);
+  });
+}
+
+function onMagnifierChange() {
+  setMagnifierEnabled(magnifierEnabled.value).catch((err: unknown) => {
+    console.error("Failed to set magnifier:", err);
   });
 }
 

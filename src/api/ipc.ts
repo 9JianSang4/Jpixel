@@ -89,6 +89,14 @@ export async function setCrosshairGuides(enabled: boolean): Promise<void> {
   return invoke("set_crosshair_guides", { value: enabled });
 }
 
+export async function getMagnifierEnabled(): Promise<boolean> {
+  return invoke("get_magnifier_enabled");
+}
+
+export async function setMagnifierEnabled(enabled: boolean): Promise<void> {
+  return invoke("set_magnifier_enabled", { value: enabled });
+}
+
 export async function getSelectionMode(): Promise<SelectionMode> {
   return invoke("get_selection_mode");
 }

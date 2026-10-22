@@ -90,8 +90,18 @@ pub fn show_hotkey_error(name: &str) {
     show_toast(
         "截图快捷键不可用",
         format!(
-            "无法注册 {name}，可能已被其他程序占用。请打开托盘菜单 → 设置，换一个快捷键。"
+            "无法注册 {name}，可能已被其他程序占用。会继续自动重试，也可以打开托盘菜单 → 设置换一个快捷键。"
         ),
+        0,
+        0,
+        0,
+    );
+}
+
+pub fn show_hotkey_ready(name: &str) {
+    show_toast(
+        "截图快捷键已恢复",
+        format!("{name} 现在可以使用了。"),
         0,
         0,
         0,

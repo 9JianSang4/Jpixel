@@ -30,6 +30,8 @@ pub struct AppConfig {
     pub auto_launch: bool,
     #[serde(default = "default_crosshair_guides")]
     pub crosshair_guides: bool,
+    #[serde(default = "default_magnifier_enabled")]
+    pub magnifier_enabled: bool,
     #[serde(default)]
     pub selection_mode: SelectionMode,
     #[serde(default)]
@@ -37,6 +39,10 @@ pub struct AppConfig {
 }
 
 fn default_crosshair_guides() -> bool {
+    true
+}
+
+fn default_magnifier_enabled() -> bool {
     true
 }
 
@@ -124,6 +130,7 @@ impl Default for AppConfig {
             pin_limit: PinLimit::Eight,
             auto_launch: false,
             crosshair_guides: true,
+            magnifier_enabled: true,
             selection_mode: SelectionMode::Reselect,
             double_press_speed: DoublePressSpeed::Normal,
         }
@@ -140,6 +147,7 @@ fn overlay_binding(value: &str, fallback: crate::overlay::KeyBinding) -> crate::
 pub fn native_overlay_options(config: &AppConfig) -> crate::overlay::OverlayOptions {
     crate::overlay::OverlayOptions {
         crosshair_guides: config.crosshair_guides,
+        magnifier_enabled: config.magnifier_enabled,
         selection_mode: config.selection_mode,
         double_press_enabled: config.double_press_enabled,
         double_press_window_ms: config.double_press_speed.window_ms(),
@@ -266,6 +274,7 @@ config_getter!(get_pin_limit, pin_limit, PinLimit);
 
 config_getter!(get_auto_launch, auto_launch, bool);
 config_getter!(get_crosshair_guides, crosshair_guides, bool);
+config_getter!(get_magnifier_enabled, magnifier_enabled, bool);
 config_getter!(get_selection_mode, selection_mode, SelectionMode);
 config_getter!(get_double_press_speed, double_press_speed, DoublePressSpeed);
 
@@ -291,6 +300,20 @@ pub fn set_crosshair_guides(
 ) -> Result<(), JpixelError> {
     let mut cfg = lock_or_warn!(config);
     cfg.crosshair_guides = value;
+    let clone = cfg.clone();
+    drop(cfg);
+    crate::overlay::set_options(native_overlay_options(&clone));
+    save_config(&app, &clone)
+}
+
+#[tauri::command]
+pub fn set_magnifier_enabled(
+    app: AppHandle,
+    config: State<ConfigArc>,
+    value: bool,
+) -> Result<(), JpixelError> {
+    let mut cfg = lock_or_warn!(config);
+    cfg.magnifier_enabled = value;
     let clone = cfg.clone();
     drop(cfg);
     crate::overlay::set_options(native_overlay_options(&clone));
@@ -524,6 +547,7 @@ mod tests {
         assert_eq!(cfg.save_hotkey, "Ctrl+S");
         assert_eq!(cfg.pin_hotkey, "Ctrl+T");
         assert_eq!(cfg.pin_limit, PinLimit::Eight);
+        assert!(cfg.magnifier_enabled);
     }
 
     #[test]

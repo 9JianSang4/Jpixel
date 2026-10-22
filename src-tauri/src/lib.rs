@@ -166,6 +166,8 @@ pub fn run() {
             config::set_auto_launch,
             config::get_crosshair_guides,
             config::set_crosshair_guides,
+            config::get_magnifier_enabled,
+            config::set_magnifier_enabled,
             config::get_selection_mode,
             config::set_selection_mode,
             config::get_double_press_speed,

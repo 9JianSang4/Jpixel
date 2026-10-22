@@ -84,6 +84,7 @@ pub const DEFAULT_PIN_HOTKEY: KeyBinding = KeyBinding::new(0x54, MOD_CONTROL); /
 #[derive(Debug, Clone, Copy)]
 pub struct OverlayOptions {
     pub crosshair_guides: bool,
+    pub magnifier_enabled: bool,
     pub selection_mode: SelectionMode,
     pub double_press_enabled: bool,
     pub double_press_window_ms: u64,
@@ -96,6 +97,7 @@ impl Default for OverlayOptions {
     fn default() -> Self {
         Self {
             crosshair_guides: true,
+            magnifier_enabled: true,
             selection_mode: SelectionMode::Reselect,
             double_press_enabled: false,
             double_press_window_ms: 500,
@@ -108,6 +110,7 @@ impl Default for OverlayOptions {
 
 static OPTIONS: Mutex<OverlayOptions> = Mutex::new(OverlayOptions {
     crosshair_guides: true,
+    magnifier_enabled: true,
     selection_mode: SelectionMode::Reselect,
     double_press_enabled: false,
     double_press_window_ms: 500,
@@ -155,6 +158,7 @@ struct HotkeyRequest {
 }
 
 static PENDING_HOTKEY: Mutex<Option<HotkeyRequest>> = Mutex::new(None);
+static STARTUP_HOTKEY: Mutex<Option<crate::core::hotkey::Hotkey>> = Mutex::new(None);
 
 #[derive(Debug, Clone)]
 pub struct CaptureStats {
@@ -245,6 +249,8 @@ const TOOLBAR_H: i32 = TOOLBAR_BUTTON_H + 2 * TOOLBAR_PAD;
 const TOOLBAR_ANIM_MS: u128 = 160;
 const TOOLBAR_ANIM_OFFSET: i32 = 8;
 const TOOLBAR_TIMER_ID: usize = 0x52;
+const COLOR_COPY_TIMER_ID: usize = 0x53;
+const HOTKEY_RETRY_TIMER_ID: usize = 0x54;
 
 #[derive(Debug, Clone, Copy)]
 struct ToolbarMotion {
@@ -295,6 +301,7 @@ struct OverlayState {
     toolbar_last: Option<RECT>,
     selection_pending_start: Option<POINT>,
     mouse_up_releasing: bool,
+    color_copied: Option<Instant>,
 }
 
 impl OverlayState {
@@ -341,6 +348,7 @@ impl OverlayState {
             toolbar_last: None,
             selection_pending_start: None,
             mouse_up_releasing: false,
+            color_copied: None,
         }
     }
 }
@@ -460,6 +468,14 @@ fn run(hotkey: crate::core::hotkey::Hotkey) -> Result<()> {
     warm_up(&monitors);
     if let Err(e) = register_hotkey(hotkey.vk, hotkey.mods, &hotkey.name) {
         log::error!("cannot register startup hotkey {}: {e}", hotkey.name);
+        if let Ok(mut pending) = STARTUP_HOTKEY.lock() {
+            *pending = Some(hotkey.clone());
+        }
+        if let Ok(hwnd) = with_state(|state| state.hwnd) {
+            unsafe {
+                let _ = SetTimer(hwnd, HOTKEY_RETRY_TIMER_ID, 2000, None);
+            }
+        }
         crate::bubble::show_hotkey_error(&hotkey.name);
     }
     run_message_loop();
@@ -502,13 +518,12 @@ pub fn trigger_pin_confirm() {
     }
 }
 
-pub fn register_hotkey(vk: u32, mods: u32, name: &str) -> Result<()> {
+fn try_register_hotkey(vk: u32, mods: u32, name: &str) -> Result<()> {
     let hwnd = with_state(|state| state.hwnd)?;
     let modifiers = HOT_KEY_MODIFIERS(mods) | MOD_NOREPEAT;
     if let Err(e) = unsafe { RegisterHotKey(hwnd, HOTKEY_ID, modifiers, vk) } {
-        log::error!("cannot register hotkey {name}: {e}; another app may already own it");
         return Err(anyhow!(
-            "RegisterHotKey({name}) failed; another app may already own it"
+            "RegisterHotKey({name}) failed: {e}; another app may already own it"
         ));
     }
     let _ = with_state_mut(|state| {
@@ -517,11 +532,43 @@ pub fn register_hotkey(vk: u32, mods: u32, name: &str) -> Result<()> {
         state.hotkey_name = name.to_string();
         Ok(())
     });
+    Ok(())
+}
+
+pub fn register_hotkey(vk: u32, mods: u32, name: &str) -> Result<()> {
+    if let Err(e) = try_register_hotkey(vk, mods, name) {
+        log::error!("{e}");
+        return Err(e);
+    }
+    let hwnd = with_state(|state| state.hwnd)?;
     log::info!(
         "registered native hotkey: {name} (overlay hwnd=0x{:X})",
         hwnd.0
     );
     Ok(())
+}
+
+fn retry_startup_hotkey(hwnd: HWND) {
+    let pending = STARTUP_HOTKEY
+        .lock()
+        .ok()
+        .and_then(|hotkey| hotkey.clone());
+    let Some(hotkey) = pending else {
+        unsafe {
+            let _ = KillTimer(hwnd, HOTKEY_RETRY_TIMER_ID);
+        }
+        return;
+    };
+    if try_register_hotkey(hotkey.vk, hotkey.mods, &hotkey.name).is_ok() {
+        if let Ok(mut pending) = STARTUP_HOTKEY.lock() {
+            *pending = None;
+        }
+        unsafe {
+            let _ = KillTimer(hwnd, HOTKEY_RETRY_TIMER_ID);
+        }
+        log::info!("recovered screenshot hotkey {}", hotkey.name);
+        crate::bubble::show_hotkey_ready(&hotkey.name);
+    }
 }
 
 /// Change the native hotkey from the Tauri/settings thread.
@@ -581,6 +628,12 @@ fn apply_hotkey_change(vk: u32, mods: u32, name: &str) -> std::result::Result<()
             .map_err(|e| e.to_string())?;
     if hwnd.0 == 0 {
         return Err("native overlay window is not ready".to_string());
+    }
+    if let Ok(mut pending) = STARTUP_HOTKEY.lock() {
+        *pending = None;
+    }
+    unsafe {
+        let _ = KillTimer(hwnd, HOTKEY_RETRY_TIMER_ID);
     }
 
     unsafe {
@@ -744,6 +797,7 @@ pub fn capture_monitor(monitor: &MonitorInfo, mode: &str) -> Result<CaptureStats
         state.toolbar_last = None;
         state.selection_pending_start = None;
         state.mouse_up_releasing = false;
+        state.color_copied = None;
         state.visible = true;
         state.prev_foreground = prev;
         state.monitor_label = monitor.describe();
@@ -1456,6 +1510,9 @@ fn draw_crosshair(back: &Dib, state: &OverlayState) -> Result<()> {
 }
 
 fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
+    if !current_options().magnifier_enabled {
+        return Ok(());
+    }
     if selection_rect(state).is_some() && !state.dragging {
         return Ok(());
     }
@@ -1474,8 +1531,8 @@ fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
 
     const SOURCE: i32 = 15;
     const IMAGE_SIZE: i32 = 144;
-    const PANEL_W: i32 = 164;
-    const PANEL_H: i32 = 196;
+    const PANEL_W: i32 = 184;
+    const PANEL_H: i32 = 214;
     const PAD: i32 = 10;
 
     let source_x = (cursor.x - SOURCE / 2)
@@ -1620,9 +1677,9 @@ fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
             .collect();
         let mut rgb_rect = RECT {
             left: x + PAD,
-            top: y + PANEL_H - 24,
-            right: x + PANEL_W - 48,
-            bottom: y + PANEL_H - 6,
+            top: y + PAD + IMAGE_SIZE + 24,
+            right: x + PANEL_W - PAD,
+            bottom: y + PAD + IMAGE_SIZE + 40,
         };
         let _ = DrawTextW(
             hdc,
@@ -1630,12 +1687,20 @@ fn draw_magnifier(hdc: HDC, state: &OverlayState) -> Result<()> {
             &mut rgb_rect,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER,
         );
-        let mut hint: Vec<u16> = "C 复制".encode_utf16().collect();
+        let mut hint: Vec<u16> = if state
+            .color_copied
+            .map(|at| at.elapsed() < Duration::from_millis(1200))
+            .unwrap_or(false)
+        {
+            "已复制".encode_utf16().collect()
+        } else {
+            "C 复制颜色".encode_utf16().collect()
+        };
         let mut hint_rect = RECT {
-            left: x + PANEL_W - 52,
-            top: y + PANEL_H - 24,
+            left: x + PAD,
+            top: y + PANEL_H - 18,
             right: x + PANEL_W - PAD,
-            bottom: y + PANEL_H - 6,
+            bottom: y + PANEL_H - 4,
         };
         let _ = DrawTextW(
             hdc,
@@ -2318,6 +2383,7 @@ pub fn hide_overlay() {
         state.toolbar_freeze = None;
         state.toolbar_last = None;
         state.selection_pending_start = None;
+        state.color_copied = None;
         state.visible = false;
         state.dragging = false;
         state.hover_button = None;
@@ -2371,7 +2437,20 @@ fn copy_cursor_color() {
     let hex = format!("#{r:02X}{g:02X}{b:02X}");
     match Clipboard::new() {
         Ok(mut clipboard) => match clipboard.set_text(hex.clone()) {
-            Ok(()) => log::info!("copied color {hex}"),
+            Ok(()) => {
+                log::info!("copied color {hex}");
+                let hwnd = with_state_mut(|state| {
+                    state.color_copied = Some(Instant::now());
+                    Ok(state.hwnd)
+                })
+                .unwrap_or(HWND(0));
+                if hwnd.0 != 0 {
+                    unsafe {
+                        let _ = SetTimer(hwnd, COLOR_COPY_TIMER_ID, 1200, None);
+                    }
+                    gdi::invalidate(hwnd);
+                }
+            }
             Err(e) => log::error!("copy color failed: {e}"),
         },
         Err(e) => log::error!("open clipboard for color copy failed: {e}"),
@@ -2534,8 +2613,21 @@ fn cancel_and_close() {
     hide_overlay();
 }
 
-fn active_modifiers() -> u32 {
-    let mut mods = 0;
+/// Chinese IMEs report VK_PROCESSKEY for letter shortcuts. Recover the physical
+/// key so Ctrl+C/S/T and the color-picker C keep working with an IME active.
+fn normalize_ime_key(raw: u32) -> u32 {
+    if raw != 0xE5 {
+        return raw;
+    }
+    for vk in [0x43u32, 0x53, 0x54] {
+        if unsafe { GetKeyState(vk as i32) } < 0 {
+            return vk;
+        }
+    }
+    raw
+}
+
+fn active_modifiers() -> u32 {    let mut mods = 0;
     unsafe {
         if GetKeyState(VK_CONTROL.0 as i32) < 0 {
             mods |= MOD_CONTROL;
@@ -2693,6 +2785,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     }
                 }
                 gdi::invalidate(hwnd);
+            } else if wparam.0 == COLOR_COPY_TIMER_ID {
+                unsafe {
+                    let _ = KillTimer(hwnd, COLOR_COPY_TIMER_ID);
+                }
+                let _ = with_state_mut(|state| {
+                    state.color_copied = None;
+                    Ok(())
+                });
+                gdi::invalidate(hwnd);
+            } else if wparam.0 == HOTKEY_RETRY_TIMER_ID {
+                retry_startup_hotkey(hwnd);
             }
             LRESULT(0)
         }
@@ -3088,9 +3191,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_KEYDOWN => {
-            let key = wparam.0 as u32;
+            let key = normalize_ime_key(wparam.0 as u32);
             let options = current_options();
             let mods = active_modifiers();
+            log::debug!(
+                "overlay key {key:#x} mods={mods:#x} magnifier={}",
+                options.magnifier_enabled
+            );
             if key == VK_ESCAPE.0 as u32 {
                 cancel_and_close();
             } else if key == VK_RETURN.0 as u32 {
@@ -3101,7 +3208,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 save_and_close();
             } else if options.pin_hotkey.matches(key, mods) {
                 pin_and_close();
-            } else if key == 0x43 && mods == 0 {
+            } else if key == 0x43 && mods == 0 && options.magnifier_enabled {
                 copy_cursor_color();
             }
             LRESULT(0)
